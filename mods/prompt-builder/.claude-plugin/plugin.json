@@ -1,0 +1,38 @@
+{
+  "name": "prompt-builder",
+  "version": "0.1.0",
+  "description": "Prima che un prompt lungo arrivi alla sessione, lo trasforma in un brief chiaro con intervista e proposte approvate; ottimizza i consumi.",
+  "author": { "name": "Indji" },
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Attivo",
+      "description": "Se attivo, i prompt lunghi vengono trasformati in un brief prima di arrivare alla sessione.",
+      "default": true
+    },
+    "minChars": {
+      "type": "number",
+      "title": "Lunghezza minima (caratteri)",
+      "description": "Sotto questa lunghezza il prompt passa senza modifiche.",
+      "default": 400
+    },
+    "minSignals": {
+      "type": "number",
+      "title": "Segnali minimi",
+      "description": "Quanti segnali di lavoro strutturato (verbo d'azione, elenco, più requisiti, percorsi, parole di progetto) servono perché il prompt diventi un brief.",
+      "default": 2
+    },
+    "model": {
+      "type": "string",
+      "title": "Modello",
+      "description": "Modello usato per l'intervista e la stesura del brief.",
+      "default": "sonnet"
+    },
+    "maxQuestions": {
+      "type": "number",
+      "title": "Domande al massimo",
+      "description": "Numero massimo di domande dell'intervista, da 0 a 8. 0 salta l'intervista.",
+      "default": 5
+    }
+  }
+}
