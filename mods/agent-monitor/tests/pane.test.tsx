@@ -14,7 +14,7 @@ const AGENTS = [
   { id: 'a2', parentId: 'a1', status: 'completed', name: 'Figlio', description: 'Figlio desc', type: 't' },
 ]
 
-type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean; agentsJson?: string; failAgentsCmd?: boolean; rejectAgentsCmd?: boolean; registry?: string | null; copy?: unknown; failOsascript?: boolean }
+type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean; agentsJson?: string; failAgentsCmd?: boolean; rejectAgentsCmd?: boolean; registry?: string | null; copy?: unknown; failOsascript?: boolean; home?: string; ctxFiles?: Record<string, string> }
 const world = (on: On, cfg: Cfg = {}) => {
   mock.store(on)
   // serve a $.turn.complete(...) nei test che riempiono usage: senza handler terminale la chiamata non risolve
@@ -52,8 +52,14 @@ const world = (on: On, cfg: Cfg = {}) => {
     if (st.cfg.failAgentsCmd) return { value: { exitCode: 1, stdout: '', stderr: 'boom' } } as never
     return { value: { exitCode: 0, stdout: st.cfg.agentsJson ?? '[]', stderr: '' } } as never
   })
+  on('env.get', () => ({ value: st.cfg.home }) as never)
   on('fs.read', (_, e) => {
     st.reads.push(e.path)
+    if (st.cfg.ctxFiles && e.path.includes('/agent-monitor/contesto/')) {
+      const f = st.cfg.ctxFiles[e.path.split('/').pop()!.replace('.json', '')]
+      if (f === undefined) throw new Error('ENOENT')
+      return { value: f } as never
+    }
     if (st.cfg.registry == null) throw new Error('ENOENT')
     return { value: st.cfg.registry } as never
   })
@@ -676,4 +682,31 @@ test('fallback testuale: le sessioni vengono prima del riepilogo agenti', async 
   expect(lines[1]).toMatch(/^◐ blocc.*tw/)
   expect(lines[2]).toMatch(/^● lav.*pf/)
   expect(r.text.indexOf('tw')).toBeLessThan(r.text.indexOf('Sessione principale'))
+})
+
+const LIVE2 = JSON.stringify([
+  { id: 's1', name: 'a', kind: 'background', cwd: '/p/a', state: 'working', sessionId: 'sid-a' },
+  { id: 's2', name: 'b', kind: 'background', cwd: '/p/b', state: 'working', sessionId: 'sid-b' },
+])
+const CTX_OK = JSON.stringify({ tokens: 470, window: 1000, percent: 47, zone: 1, at: 5 })
+
+test('sessions context: file valido finisce in context', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { 'sid-a': CTX_OK } })
+  await run($)
+  expect(st.reads).toContain('/h/.claude/agent-monitor/contesto/sid-a.json')
+  expect(st.sessions!.list.find((s) => s.id === 's1')?.context).toEqual({ percent: 47, tokens: 470, zone: 1 })
+})
+
+test('sessions context: file rotto per una, valido per l altra', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { 'sid-a': '{rotto', 'sid-b': CTX_OK } })
+  await run($)
+  expect(st.sessions!.list.find((s) => s.id === 's1')?.context).toBeUndefined()
+  expect(st.sessions!.list.find((s) => s.id === 's2')?.context).toEqual({ percent: 47, tokens: 470, zone: 1 })
+})
+
+test('sessions context: senza HOME nessuna lettura dei file di contesto', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE2, registry: '{}', ctxFiles: { 'sid-a': CTX_OK } })
+  await run($)
+  expect(st.reads.some((r) => r.includes('/contesto/'))).toBe(false)
+  expect(st.sessions!.list.every((s) => s.context === undefined)).toBe(true)
 })

@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
-import type { AgentSnapshot, AlertedMap, ContextSnapshot, ProjectSession, SessionContext, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
+import type { AgentSnapshot, AlertedMap, ContextSnapshot, CtxValue, ProjectSession, SessionContext, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
 import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setContext, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
 import type { AgentLike, Row } from './ledger'
-import { contextFilePath, contextTokens, limitsFrom, zoneOf } from './context'
+import { contextFilePath, contextTokens, parseContextFile, limitsFrom, zoneOf } from './context'
 import { attachCommand, isAttachId, mergeSessions, parseAgents, parseRegistry } from './sessions'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
@@ -176,7 +176,25 @@ async function refreshSessions($: Ctx, registryPath: string): Promise<void> {
   }
   const registry = await regP
   const self = await $.session.id().catch(() => undefined)
-  await update($, sessionsAtom, () => ({ list: mergeSessions(live, registry, at, self), stale: false, at }))
+  const merged = mergeSessions(live, registry, at, self)
+  const list = await withContext($, merged)
+  await update($, sessionsAtom, () => ({ list, stale: false, at }))
+}
+
+// Contesto pubblicato da ogni sessione viva; letture in parallelo, errori ignorati.
+async function withContext($: Ctx, list: ProjectSession[]): Promise<ProjectSession[]> {
+  const home = await $.env.get('HOME').catch(() => undefined)
+  if (!home) return list
+  return Promise.all(list.map(async (s) => {
+    if (!s.sessionId) return s
+    const c = await $.fs.read(contextFilePath(home, s.sessionId)).then(parseContextFile, () => undefined).catch(() => undefined)
+    if (!c || (c.percent === undefined && c.tokens === undefined)) return s
+    const context: CtxValue = {}
+    if (c.percent !== undefined) context.percent = c.percent
+    if (c.tokens !== undefined) context.tokens = c.tokens
+    if (c.zone !== null) context.zone = c.zone
+    return { ...s, context }
+  }))
 }
 
 function stopTimer() {

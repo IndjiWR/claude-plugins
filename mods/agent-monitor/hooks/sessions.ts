@@ -96,6 +96,7 @@ export function mergeSessions(live: readonly LiveSession[], registry: readonly R
       project: e?.project ?? (l.cwd.split('/').filter(Boolean).pop() ?? l.name),
       cwd: l.cwd,
       state,
+      sessionId: l.sessionId,
       reason: state === 'blocked' ? l.waitingFor : undefined,
       esito: e?.esito,
       esitoOra: e?.esitoOra,
