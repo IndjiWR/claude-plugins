@@ -20,11 +20,11 @@ auto-clear-context è configurata, la zona (normale / morbida / dura / margine).
    Percentuale del subagent = token / `window` della principale, solo se `usage.model` coincide con il modello
    dell'ultima richiesta della principale; altrimenti si mostrano i token.
 3. **Sessioni di progetto**: `claude agents --json` non dà il contesto. Ogni sessione con agent-monitor scrive il
-   proprio in `~/.claude/agent-monitor/contesto/<sessionId>.json` (`HOME` da `$.env.get`):
+   proprio in `~/.claude/agent-monitor/contesto/<id del job>.json` (`HOME` da `$.env.get`; id del job = ultimo segmento di `CLAUDE_JOB_DIR`, se manca `$.session.id()`):
    `{ "tokens": n, "window": n, "percent": n, "zone": 0-3 | null, "at": ms }`, a ogni `turn.complete` della
    principale (scrittura best-effort, errori ignorati). Il pannello, nella lettura delle sessioni (al più ogni
-   10 s), legge il file del `sessionId` di ogni sessione viva (le chiuse viste solo nel registro non hanno `sessionId`:
-   nessun dato); manca o non valido → nessun dato.
+   10 s), legge il file con l'`id` di `claude agents --json` (= id del job) di ogni sessione viva (le chiuse viste solo nel
+   registro: nessun dato); manca o non valido → nessun dato.
    Serve agent-monitor installato nelle sessioni di progetto (scope utente: già così).
 4. **Soglie**: `$.config.list()`, righe `auto-clear-context.threshold` e `auto-clear-context.hardThreshold`
    (numeri). Assenti → nessuna zona, solo percentuale. Lette al più ogni 10 s insieme alle sessioni.

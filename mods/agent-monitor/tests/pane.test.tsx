@@ -286,6 +286,12 @@ test('colonne: 120 tutto, 65 senza TURNI e barra, 45 solo glifo, nome e token', 
   expect((await tx(ui, 'head'))?.text).toContain('CTX')
   expect((await tx(ui, 'tokens-a1'))?.text).toMatch(/█/)
   await ui.unmount()
+  ui = await at(53)
+  expect((await tx(ui, 'head'))?.text).toContain('CTX')
+  await ui.unmount()
+  ui = await at(52)
+  expect((await tx(ui, 'head'))?.text).not.toContain('CTX')
+  await ui.unmount()
   ui = await at(65)
   expect((await tx(ui, 'head'))?.text).toContain('CTX')
   expect((await tx(ui, 'head'))?.text).not.toContain('TURNI')
@@ -690,27 +696,27 @@ test('fallback testuale: le sessioni vengono prima del riepilogo agenti', async 
 })
 
 const LIVE2 = JSON.stringify([
-  { id: 's1', name: 'a', kind: 'background', cwd: '/p/a', state: 'working', sessionId: 'sid-a' },
-  { id: 's2', name: 'b', kind: 'background', cwd: '/p/b', state: 'working', sessionId: 'sid-b' },
+  { id: 's1', name: 'a', kind: 'background', cwd: '/p/a', state: 'working', sessionId: 'x-a' },
+  { id: 's2', name: 'b', kind: 'background', cwd: '/p/b', state: 'working', sessionId: 'x-b' },
 ])
 const CTX_OK = JSON.stringify({ tokens: 470, window: 1000, percent: 47, zone: 1, at: 5 })
 
 test('sessions context: file valido finisce in context', async ($, on) => {
-  const st = world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { 'sid-a': CTX_OK } })
+  const st = world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { s1: CTX_OK } })
   await run($)
-  expect(st.reads).toContain('/h/.claude/agent-monitor/contesto/sid-a.json')
+  expect(st.reads).toContain('/h/.claude/agent-monitor/contesto/s1.json')
   expect(st.sessions!.list.find((s) => s.id === 's1')?.context).toEqual({ percent: 47, tokens: 470, zone: 1 })
 })
 
 test('sessions context: file rotto per una, valido per l altra', async ($, on) => {
-  const st = world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { 'sid-a': '{rotto', 'sid-b': CTX_OK } })
+  const st = world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { s1: '{rotto', s2: CTX_OK } })
   await run($)
   expect(st.sessions!.list.find((s) => s.id === 's1')?.context).toBeUndefined()
   expect(st.sessions!.list.find((s) => s.id === 's2')?.context).toEqual({ percent: 47, tokens: 470, zone: 1 })
 })
 
 test('sessions context: senza HOME nessuna lettura dei file di contesto', async ($, on) => {
-  const st = world(on, { agentsJson: LIVE2, registry: '{}', ctxFiles: { 'sid-a': CTX_OK } })
+  const st = world(on, { agentsJson: LIVE2, registry: '{}', ctxFiles: { s1: CTX_OK } })
   await run($)
   expect(st.reads.some((r) => r.includes('/contesto/'))).toBe(false)
   expect(st.sessions!.list.every((s) => s.context === undefined)).toBe(true)
@@ -770,7 +776,7 @@ test('colonna CTX: zona 0 colore normale, zona 2 rossa, zona 3 rossa in grassett
 })
 
 test('riga sessione: ctx dopo il progetto, assente senza context, invariata a 40 colonne', async ($, on) => {
-  world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { 'sid-a': CTX_OK } })
+  world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { s1: CTX_OK } })
   let ui = await openPane($, 'terminal')
   const rowA = await ui.find({ type: 'Text', text: /● lav .*a · a/ })
   expect(rowA?.text).toMatch(/ · a · ctx 47% mor/)

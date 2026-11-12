@@ -134,7 +134,8 @@ async function refreshContext($: Ctx) {
 // Scrive il contesto della sessione per le altre sessioni; fs.write crea le cartelle. Errori ignorati.
 async function publishContext($: Ctx) {
   try {
-    const [home, id] = await Promise.all([$.env.get('HOME'), $.session.id()])
+    const [home, jobDir] = await Promise.all([$.env.get('HOME'), $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)])
+    const id = jobDir?.split('/').filter(Boolean).pop() || (await $.session.id())
     if (!home || !id) return
     const [usage, rows, at] = await Promise.all([$.session.usage(), $.config.list().catch(() => []), $.clock.now()])
     const limits = limitsFrom(rows)
@@ -195,8 +196,7 @@ async function withContext($: Ctx, list: ProjectSession[]): Promise<ProjectSessi
   const home = await $.env.get('HOME').catch(() => undefined)
   if (!home) return list
   return Promise.all(list.map(async (s) => {
-    if (!s.sessionId) return s
-    const c = await $.fs.read(contextFilePath(home, s.sessionId)).then(parseContextFile, () => undefined).catch(() => undefined)
+    const c = await $.fs.read(contextFilePath(home, s.id)).then(parseContextFile, () => undefined).catch(() => undefined)
     if (!c || (c.percent === undefined && c.tokens === undefined)) return s
     const context: CtxValue = {}
     if (c.percent !== undefined) context.percent = c.percent
@@ -261,15 +261,17 @@ export const register: Register = (on, options) => {
   // Streaming: i pezzi passano intatti e il risultato è quello di next(e); lo stato si aggiorna dopo, senza poterlo cambiare.
   on('turn.step', async function* ($, e, next) {
     const r = yield* next(e)
-    try {
-      const u = r.usage
-      if (u) {
-        const now = await $.clock.now()
-        await update($, usageAtom, (m) => setContext(m, e.agentId || MAIN, contextTokens(u), u.model, now))
+    void (async () => {
+      try {
+        const u = r.usage
+        if (u) {
+          const now = await $.clock.now()
+          await update($, usageAtom, (m) => setContext(m, e.agentId || MAIN, contextTokens(u), u.model, now))
+        }
+      } catch {
+        // un errore di contabilità non tocca la risposta
       }
-    } catch {
-      // un errore di contabilità non tocca la risposta
-    }
+    })()
     return r
   }).catch(async function* ($, e, next) {
     return yield* next(e)
@@ -350,7 +352,7 @@ export const register: Register = (on, options) => {
     const selId = selSession ? '' : rows.some((r) => r.id === stored) ? stored : (rows.find((r) => r.id !== MAIN && ACTIVE.has(r.status))?.id ?? '')
     const sel = rows.find((r) => r.id === selId)
 
-    // Colonne: < 70 niente TURNI né barra; < 50 solo glifo, nome e token.
+    // Colonne: < 70 niente TURNI né barra; < 53 niente CTX; < 50 solo glifo, nome e token.
     const narrow = cols < 70
     const tiny = cols < 50
     // Una sola definizione di colonne per intestazione e righe: stessa larghezza, il gap è l'ultima cella di ogni colonna.
@@ -377,7 +379,7 @@ export const register: Register = (on, options) => {
       text: (r) => (narrow ? formatCompact(tokenOf(r)) : `${bar(tokenOf(r), limit, 6)} ${formatCompact(tokenOf(r))}`),
       color: (r) => (r.id === MAIN ? undefined : LEVEL_COLOR[usageLevel(tokenOf(r), limit)]),
     })
-    if (!tiny) {
+    if (cols >= 53) {
       tail.push({
         id: 'ctx',
         header: 'CTX',

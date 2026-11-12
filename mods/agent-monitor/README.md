@@ -7,7 +7,7 @@ Mod per Claude Code: un pannello live accanto alla chat con gli agenti della ses
 - **Riepilogo** in un riquadro: conteggi per gruppo (attivi, in attesa, in coda, finiti, errori; solo quelli non zero), token totali con barra sul budget di sessione (se `sessionBudget` > 0) e token per modello.
 - **Tabella** con una riga per agente sotto la **Sessione principale**: stato, nome ad albero, modello, token con barra (colorata per soglia: verde, giallo, rosso rispetto ad `alertTokens`), **CTX** (contesto usato, vedi sotto), durata e turni. Gli agenti finiti sono in grigio.
 - **Selezione**: il pulsante a sinistra della riga (`▸` selezionato, `○` altrimenti) sceglie l'agente. All'apertura è selezionato il primo agente attivo. Sotto la tabella la barra azioni mostra **Transcript** e **Ferma** per l'agente scelto, con il dettaglio `in · out · cache`.
-- Su pannelli stretti la tabella si riduce: sotto 70 colonne spariscono TURNI e la barra dei token; sotto 50 restano solo glifo di stato, nome e token (niente CTX).
+- Su pannelli stretti la tabella si riduce: sotto 70 colonne spariscono TURNI e la barra dei token; sotto 53 sparisce CTX; sotto 50 restano solo glifo di stato, nome e token.
 - Si aggiorna ogni `refreshMs` (default 2000 ms) solo mentre il pannello è aperto.
 - Se la lista degli agenti non si legge, compare la nota "elenco non aggiornato".
 
@@ -30,10 +30,10 @@ Sotto il riepilogo e sopra la tabella degli agenti la sezione **SESSIONI DI PROG
 
 La colonna **CTX** (8 caratteri, dopo TOKEN) mostra quanto contesto usa ogni riga, per esempio `47% mor`; la riga delle sessioni di progetto aggiunge `ctx 47% mor`, il testo di `/agenti` `ctx 47% (zona morbida)`.
 
-- **Tre fonti**: la sessione principale legge la finestra dal motore (`$.session.usage()`); i subagent dall'ultima richiesta del modello (`turn.step`: input + cache letta + cache scritta); le sessioni di progetto dal file che ognuna pubblica a ogni turno.
+- **Tre fonti**: la sessione principale legge la finestra dal motore (`$.session.usage()`); i subagent dall'ultima richiesta del modello (`turn.step`: input + cache letta + cache scritta); le sessioni di progetto dal file che ognuna pubblica a ogni turno (nome = id del job, cioè l'`id` di `claude agents --json`).
 - **Zone**: `nor`, `mor` (morbida), `dur` (dura), `mar` (margine di sicurezza superato), calcolate con le soglie di auto-clear-context lette da `/config`: morbida = `threshold`, dura = max(`hardThreshold`, morbida + 10) fino a 95, margine = dura + 15 fino a 95. Colori: zona normale col testo normale, morbida gialla, dura rossa, margine rosso in grassetto. Senza auto-clear-context (o con soglia morbida <= 0) non c'è zona: solo la percentuale.
 - **Subagent**: la percentuale si mostra solo a parità di modello con la sessione principale (stessa finestra); con un altro modello compaiono i token compatti, senza dato `—`.
-- **Limiti**: gli override di `/soglia` non sono visti (valgono solo le soglie di `/config`); le sessioni di progetto compaiono con il contesto solo se hanno agent-monitor installato; i file stanno in `~/.claude/agent-monitor/contesto/<id sessione>.json`.
+- **Limiti**: gli override di `/soglia` non sono visti (valgono solo le soglie di `/config`); le sessioni di progetto compaiono con il contesto solo se hanno agent-monitor installato; i file stanno in `~/.claude/agent-monitor/contesto/<id del job>.json`.
 
 ## Comandi
 
