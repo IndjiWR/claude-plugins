@@ -260,3 +260,29 @@ test('senza auto-clear-context: zone null', async ($, on) => {
   await flush()
   expect(JSON.parse(writes[0].text).zone).toBeNull()
 })
+
+// Task 5: contesto nel testo di fallback di /agenti
+test('/agenti testo: ctx sulla riga principale e sulla riga della sessione', async ($, on) => {
+  world(on)
+  on('session.usage', () => ({ value: { context: { tokens: 470, window: 1000, percent: 47 } } }) as never)
+  on('config.list', () =>
+    ({ value: [{ key: 'auto-clear-context.threshold', value: 40 }, { key: 'auto-clear-context.hardThreshold', value: 60 }] }) as never)
+  on('env.get', () => ({ value: '/h' }) as never)
+  on('process.run', () =>
+    ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ id: 's1', name: 'a', kind: 'background', cwd: '/p/a', state: 'working', sessionId: 'sid-a' }]) } }) as never)
+  on('fs.read', (_, e) => {
+    if ((e as { path: string }).path.includes('/contesto/')) return { value: JSON.stringify({ tokens: 470, window: 1000, percent: 47, zone: 1, at: 5 }) } as never
+    throw new Error('ENOENT')
+  })
+  await $.turn.complete(turn(undefined, 7))
+  const lines = (await summary($)).split('\n')
+  expect(lines.find((l) => l.includes('Sessione principale'))).toContain('· ctx 47% (zona morbida)')
+  expect(lines.find((l) => l.includes('lav'))).toContain('ctx 47% (zona morbida)')
+})
+
+test('textSummary con ctxOf aggiunge ctx solo se non vuoto', () => {
+  const u = { a: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, turns: 5, firstAt: 0, lastAt: 0 } }
+  const rows = buildTree([], u, 0)
+  expect(textSummary(rows, totals(u), () => ({ percent: 30, zone: 0 }))).toContain('· ctx 30% (zona normale)')
+  expect(textSummary(rows, totals(u), () => ({}))).not.toContain('ctx')
+})

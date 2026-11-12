@@ -1,6 +1,6 @@
 {
   "name": "agent-monitor",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pannello live degli agenti e delle sessioni di progetto: stato, modello, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma/attach.",
   "author": { "name": "Indji" },
   "types": "./types/index.d.ts",

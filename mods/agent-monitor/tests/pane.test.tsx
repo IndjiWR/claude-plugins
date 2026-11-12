@@ -132,7 +132,7 @@ test('render: radice, figlio con prefisso albero, riepilogo', async ($, on) => {
   expect((await tx(ui, 'label-a2'))?.text).toMatch(/^ {2}└ Figlio desc/)
   expect((await tx(ui, 'status-a1'))?.text).toContain('● run')
   expect((await tx(ui, 'status-a2'))?.text).toContain('✓ fin')
-  expect((await tx(ui, 'head'))?.text).toMatch(/STATO.*AGENTE.*MODELLO.*TOKEN.*DUR.*TURNI/)
+  expect((await tx(ui, 'head'))?.text).toMatch(/STATO.*AGENTE.*MODELLO.*TOKEN.*CTX.*DUR.*TURNI/)
   expect(await ui.find({ type: 'Text', text: /elenco non aggiornato/ })).toBeUndefined()
   await ui.unmount()
 })
@@ -283,9 +283,11 @@ test('colonne: 120 tutto, 65 senza TURNI e barra, 45 solo glifo, nome e token', 
   const at = async (cols: number) => $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: cols }, surface: 'terminal' })
   let ui = await at(120)
   expect((await tx(ui, 'head'))?.text).toContain('TURNI')
+  expect((await tx(ui, 'head'))?.text).toContain('CTX')
   expect((await tx(ui, 'tokens-a1'))?.text).toMatch(/█/)
   await ui.unmount()
   ui = await at(65)
+  expect((await tx(ui, 'head'))?.text).toContain('CTX')
   expect((await tx(ui, 'head'))?.text).not.toContain('TURNI')
   expect((await tx(ui, 'head'))?.text).toContain('DUR')
   expect((await tx(ui, 'tokens-a1'))?.text).not.toMatch(/█/)
@@ -296,6 +298,7 @@ test('colonne: 120 tutto, 65 senza TURNI e barra, 45 solo glifo, nome e token', 
   const head = (await tx(ui, 'head'))?.text ?? ''
   expect(head).not.toContain('MODELLO')
   expect(head).not.toContain('DUR')
+  expect(head).not.toContain('CTX')
   expect(head).toContain('TOKEN')
   expect(await ui.find({ key: 'dur-a1' })).toBeUndefined()
   expect((await tx(ui, 'status-a1'))?.text.trim()).toBe('●')
@@ -429,8 +432,10 @@ test('intestazione e righe allineate: stesso offset di MODELLO e TOKEN', async (
     expect(head.indexOf('TOKEN') - 2).toBe(st.length + lb.length + 9)
     expect(head.indexOf('AGENTE') - 2).toBe(st.length)
     const tk = (await tx(ui, 'tokens-a1'))?.text ?? ''
+    const ctx = (await tx(ui, 'ctx-a1'))?.text ?? ''
+    expect(head.indexOf('CTX') - 2).toBe(st.length + lb.length + 9 + tk.length)
     const dur = head.indexOf('DUR')
-    if (dur >= 0) expect(dur - 2).toBe(st.length + lb.length + 9 + tk.length)
+    if (dur >= 0) expect(dur - 2).toBe(st.length + lb.length + 9 + tk.length + ctx.length)
     await ui.unmount()
   }
 })
@@ -709,4 +714,70 @@ test('sessions context: senza HOME nessuna lettura dei file di contesto', async 
   await run($)
   expect(st.reads.some((r) => r.includes('/contesto/'))).toBe(false)
   expect(st.sessions!.list.every((s) => s.context === undefined)).toBe(true)
+})
+
+// --- colonna CTX e contesto nelle sessioni ---
+const step = (model: string, input: number) =>
+  ({ turnId: 't', index: 0, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: { model, input_tokens: input, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }) as never
+const ctxPane = async ($: never, on: On, percent: number, cfg: Cfg = {}) => {
+  const cur = { percent }
+  const st = { ...world(on, { agents: [...AGENTS, { id: 'a3', status: 'running', description: 'Muto', type: 't' }], ...cfg }), cur }
+  on('session.usage', () => ({ value: { context: { tokens: cur.percent * 10, window: 1000, percent: cur.percent } } }) as never)
+  on('config.list', () => ({ value: [{ key: 'auto-clear-context.threshold', value: 40 }, { key: 'auto-clear-context.hardThreshold', value: 60 }] }) as never)
+  on('turn.step', async function* (_, e) {
+    const id = (e as { agentId?: string }).agentId
+    return id === 'a1' ? step('sonnet', 500) : id === 'a2' ? step('haiku', 1500) : step('sonnet', 470)
+  })
+  for (const id of [undefined, 'a1', 'a2']) {
+    const it = ($ as { turn: { step: (i: never) => AsyncGenerator<unknown, unknown> } }).turn.step({ turnId: 't', index: 0, model: 'm', messageCount: 1, agentId: id } as never)
+    while (!(await it.next()).done);
+  }
+  await run($ as never)
+  return st
+}
+
+test('colonna CTX: principale, subagent stesso modello, altro modello, senza dato', async ($, on) => {
+  await ctxPane($ as never, on, 47)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await tx(ui, 'ctx-main'))?.text.trim()).toBe('47% mor')
+  expect((await tx(ui, 'ctx-main'))?.props.color).toBe('warning')
+  expect((await tx(ui, 'ctx-a1'))?.text.trim()).toBe('50% mor')
+  expect((await tx(ui, 'ctx-a2'))?.text.trim()).toBe('1,5k')
+  expect((await tx(ui, 'ctx-a3'))?.text.trim()).toBe('—')
+  await ui.unmount()
+})
+
+test('colonna CTX: zona 0 colore normale, zona 2 rossa, zona 3 rossa in grassetto', async ($, on) => {
+  const st = await ctxPane($ as never, on, 30)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await tx(ui, 'ctx-main'))?.text.trim()).toBe('30% nor')
+  expect((await tx(ui, 'ctx-main'))?.props.color).toBeUndefined()
+  await ui.unmount()
+  st.cur.percent = 65
+  await st.clock.advance(2000)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await tx(ui, 'ctx-main'))?.text.trim()).toBe('65% dur')
+  expect((await tx(ui, 'ctx-main'))?.props.color).toBe('error')
+  expect((await tx(ui, 'ctx-main'))?.props.bold).toBeUndefined()
+  await ui.unmount()
+  st.cur.percent = 80
+  await st.clock.advance(2000)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await tx(ui, 'ctx-main'))?.text.trim()).toBe('80% mar')
+  expect((await tx(ui, 'ctx-main'))?.props.color).toBe('error')
+  expect((await tx(ui, 'ctx-main'))?.props.bold).toBe(true)
+  await ui.unmount()
+})
+
+test('riga sessione: ctx dopo il progetto, assente senza context, invariata a 40 colonne', async ($, on) => {
+  world(on, { agentsJson: LIVE2, registry: '{}', home: '/h', ctxFiles: { 'sid-a': CTX_OK } })
+  let ui = await openPane($, 'terminal')
+  const rowA = await ui.find({ type: 'Text', text: /● lav .*a · a/ })
+  expect(rowA?.text).toMatch(/ · a · ctx 47% mor/)
+  const rowB = await ui.find({ type: 'Text', text: /● lav .*b · b/ })
+  expect(rowB?.text).not.toContain('ctx')
+  await ui.unmount()
+  ui = await openPane($, 'terminal', 40)
+  expect((await ui.find({ type: 'Text', text: /● a/ }))?.text).not.toContain('ctx')
+  await ui.unmount()
 })

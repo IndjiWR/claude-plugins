@@ -4,7 +4,7 @@ import type { Register, StateDollar, Timer } from 'claude-code'
 import type { AgentSnapshot, AlertedMap, ContextSnapshot, CtxValue, ProjectSession, SessionContext, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
 import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setContext, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
 import type { AgentLike, Row } from './ledger'
-import { contextFilePath, contextTokens, parseContextFile, limitsFrom, zoneOf } from './context'
+import { agentValue, contextFilePath, contextTokens, ctxCell, ctxText, limitsFrom, mainValue, parseContextFile, zoneOf } from './context'
 import { attachCommand, isAttachId, mergeSessions, parseAgents, parseRegistry } from './sessions'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
@@ -18,6 +18,8 @@ const selectedAtom = atom({ plugin: 'agent-monitor', key: 'selected' } as const,
 const PANE = 'agenti'
 
 const LEVEL_COLOR = { ok: 'success', warn: 'warning', over: 'error' } as const
+// Zona 0 col colore del testo normale; 3 è rosso in grassetto (vedi bold della colonna)
+const CTX_COLOR: readonly (string | undefined)[] = [undefined, LEVEL_COLOR.warn, LEVEL_COLOR.over, LEVEL_COLOR.over]
 const STATUS_VIEW: Record<string, { glyph: string; label: string; color: string }> = {
   running: { glyph: '●', label: 'run', color: 'success' },
   idle: { glyph: '●', label: 'idle', color: 'success' },
@@ -57,10 +59,10 @@ function treePrefix(rows: Row[], i: number): string {
 const trunc = (s: string, w: number) => (s.length > w ? s.slice(0, Math.max(0, w - 1)) + '…' : s)
 
 // Riga di una sessione: glifo + stato, nome, progetto, esito troncato alla larghezza residua (sotto 50 colonne solo glifo e nome).
-function sessionLine(s: ProjectSession, cols: number): string {
+function sessionLine(s: ProjectSession, cols: number, ctx = ''): string {
   const v = SESSION_VIEW[s.state]
   if (cols < 50) return `${v.glyph} ${s.name}`
-  const head = `${v.glyph} ${v.label.padEnd(5)} ${s.name} · ${s.project}`
+  const head = `${v.glyph} ${v.label.padEnd(5)} ${s.name} · ${s.project}${ctx ? ` · ${ctx}` : ''}`
   const room = cols - 2 - head.length - 3
   return s.esito && room >= 4 ? `${head} · ${trunc(s.esito, room)}` : head
 }
@@ -68,16 +70,23 @@ function sessionLine(s: ProjectSession, cols: number): string {
 const counts = (t: TokenCounts) =>
   `in ${formatTokens(t.input)} / out ${formatTokens(t.output)} / cache ${formatTokens(t.cacheRead)}+${formatTokens(t.cacheWrite)}`
 
-const rowLine = (r: Row) =>
-  `${'  '.repeat(r.depth)}${r.status} ${r.label} · ${r.model ?? '—'} · ${counts(r.tokens)} · ${formatDuration(r.durationMs)} · ${r.turns} turni`
+const rowLine = (r: Row, v: CtxValue = {}) =>
+  `${'  '.repeat(r.depth)}${r.status} ${r.label} · ${r.model ?? '—'} · ${counts(r.tokens)} · ${formatDuration(r.durationMs)} · ${r.turns} turni${ctxText(v) ? ` · ${ctxText(v)}` : ''}`
 const totalLine = (tot: TokenCounts & { turns: number }) => `Totale: ${counts(tot)} · ${tot.turns} turni`
 
-const sessionText = (list: readonly ProjectSession[]) => list.map((s) => sessionLine(s, 120)).join('\n')
+const sessionText = (list: readonly ProjectSession[]) => list.map((s) => sessionLine(s, 120, s.context ? ctxText(s.context) : '')).join('\n')
 
-export function textSummary(rows: Row[], tot: TokenCounts & { turns: number }): string {
-  const lines = rows.map(rowLine)
+export function textSummary(rows: Row[], tot: TokenCounts & { turns: number }, ctxOf?: (id: string) => CtxValue): string {
+  const lines = rows.map((r) => rowLine(r, ctxOf?.(r.id)))
   lines.push(totalLine(tot))
   return lines.join('\n')
+}
+
+// Contesto di una riga: la principale dalla finestra del motore, i subagent in rapporto alla finestra della principale.
+function ctxValueOf(id: string, usage: UsageMap, c: ContextSnapshot): CtxValue {
+  const limits = c.limits ?? undefined
+  if (id === MAIN) return mainValue(c.main, limits)
+  return agentValue(usage[id], c.main?.window, usage[MAIN]?.ctxModel, limits)
 }
 
 type Ctx = StateDollar & {
@@ -291,8 +300,11 @@ export const register: Register = (on, options) => {
     }
     const now = await $.clock.now()
     await refreshSessions($, registryPath).catch(() => {})
+    await refreshContext($).catch(() => {})
     const sessions = (await read($, sessionsAtom)).list
     const usage = await read($, usageAtom)
+    const ctx = await read($, contextAtom)
+    const ctxOf = (id: string) => ctxValueOf(id, usage, ctx)
     let agents: readonly AgentLike[]
     let stale = false
     try {
@@ -305,7 +317,7 @@ export const register: Register = (on, options) => {
       text:
         `Il pannello non si apre qui (${opened.reason}).\n` +
         (sessions.length > 0 ? sessionText(sessions) + '\n' : '') +
-        textSummary(buildTree(agents, usage, now), totals(usage)) +
+        textSummary(buildTree(agents, usage, now), totals(usage), ctxOf) +
         (stale ? '\nelenco non aggiornato' : ''),
     }
   }).catch(($, e, next) => next(e))
@@ -325,6 +337,8 @@ export const register: Register = (on, options) => {
     const snap = await read($, agentsAtom)
     const usage = await read($, usageAtom)
     const rows = buildTree(snap.list, usage, now)
+    const ctxSnap = await read($, contextAtom)
+    const ctxOf = (id: string) => ctxValueOf(id, usage, ctxSnap)
     const cols = e.props?.bodyColumns ?? 120
     const tot = totals(usage)
     const total = tot.input + tot.output
@@ -340,7 +354,7 @@ export const register: Register = (on, options) => {
     const narrow = cols < 70
     const tiny = cols < 50
     // Una sola definizione di colonne per intestazione e righe: stessa larghezza, il gap è l'ultima cella di ogni colonna.
-    type Col = { id: string; header: string; w: number; keyed: boolean; text: (r: Row, i: number) => string; color?: (r: Row) => string | undefined }
+    type Col = { id: string; header: string; w: number; keyed: boolean; text: (r: Row, i: number) => string; color?: (r: Row) => string | undefined; bold?: (r: Row) => boolean }
     const tokenOf = (r: Row) => r.tokens.input + r.tokens.output
     const statusCol: Col = {
       id: 'status',
@@ -363,6 +377,17 @@ export const register: Register = (on, options) => {
       text: (r) => (narrow ? formatCompact(tokenOf(r)) : `${bar(tokenOf(r), limit, 6)} ${formatCompact(tokenOf(r))}`),
       color: (r) => (r.id === MAIN ? undefined : LEVEL_COLOR[usageLevel(tokenOf(r), limit)]),
     })
+    if (!tiny) {
+      tail.push({
+        id: 'ctx',
+        header: 'CTX',
+        w: 8,
+        keyed: true,
+        text: (r) => ctxCell(ctxOf(r.id)),
+        color: (r) => CTX_COLOR[ctxOf(r.id).zone ?? 0],
+        bold: (r) => ctxOf(r.id).zone === 3,
+      })
+    }
     if (!tiny) tail.push({ id: 'dur', header: 'DUR', w: 9, keyed: true, text: (r) => formatDuration(r.durationMs) })
     if (!narrow) tail.push({ id: 'turns', header: 'TURNI', w: 6, keyed: true, text: (r) => String(r.turns) })
     const labelW = Math.max(9, cols - 2 - statusCol.w - tail.reduce((n, c) => n + c.w, 0))
@@ -448,7 +473,7 @@ export const register: Register = (on, options) => {
               />
               <Text> </Text>
               <Text color={v.color} dimColor={s.state === 'closed' || undefined} bold={picked || undefined} inverse={picked || undefined}>
-                {sessionLine(s, cols)}
+                {sessionLine(s, cols, s.context && ctxText(s.context) ? `ctx ${ctxCell(s.context)}` : '')}
               </Text>
             </Box>
           )
@@ -518,7 +543,7 @@ export const register: Register = (on, options) => {
               <Text> </Text>
               {columns.map((c) => {
                 const t = (
-                  <Text key={c.id} color={c.color?.(r)} {...style}>
+                  <Text key={c.id} color={c.color?.(r)} {...style} bold={style.bold || c.bold?.(r) || undefined}>
                     {cell(c.text(r, i), c.w)}
                   </Text>
                 )
