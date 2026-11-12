@@ -6,6 +6,6 @@ export type AlertedMap = Record<string, true>
 
 declare module 'claude-code' {
   interface PluginState {
-    'agent-monitor': { usage: Shaped<UsageMap>; alerted: Shaped<AlertedMap>; agents: Shaped<AgentSnapshot> }
+    'agent-monitor': { usage: Shaped<UsageMap>; alerted: Shaped<AlertedMap>; agents: Shaped<AgentSnapshot>; selected: Shaped<string> }
   }
 }

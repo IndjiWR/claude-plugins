@@ -1,6 +1,6 @@
 {
   "name": "agent-monitor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pannello live degli agenti della sessione: stato, modello, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma.",
   "author": { "name": "Indji" },
   "types": "./types/index.d.ts",
@@ -16,6 +16,12 @@
       "title": "Aggiornamento (ms)",
       "description": "Ogni quanti millisecondi il pannello si aggiorna. Minimo 500.",
       "default": 2000
+    },
+    "sessionBudget": {
+      "type": "number",
+      "title": "Budget token della sessione",
+      "description": "Budget di token della sessione per la barra del riepilogo; 0 la nasconde",
+      "default": 0
     }
   }
 }
