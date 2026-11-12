@@ -22,6 +22,12 @@
       "title": "Budget token della sessione",
       "description": "Budget di token della sessione per la barra del riepilogo; 0 la nasconde",
       "default": 0
+    },
+    "sessionsRegistry": {
+      "type": "string",
+      "title": "Registro sessioni",
+      "description": "sessioni.json della coordinatrice; vuoto = nessun registro",
+      "default": "/Users/indji/Documents/Lavoro/Claude/Projects/Indji/coordinatrice/sessioni.json"
     }
   }
 }

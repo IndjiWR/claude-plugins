@@ -1,14 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
-import type { AgentSnapshot, AlertedMap, TokenCounts, UsageMap } from '../types'
+import type { AgentSnapshot, AlertedMap, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
 import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
 import type { AgentLike, Row } from './ledger'
+import { mergeSessions, parseAgents, parseRegistry } from './sessions'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
 const usageAtom = atom({ plugin: 'agent-monitor', key: 'usage' } as const, {} as UsageMap, { shape: 'usage-1' })
 const alertedAtom = atom({ plugin: 'agent-monitor', key: 'alerted' } as const, {} as AlertedMap, { shape: 'alerted-1' })
 const agentsAtom = atom({ plugin: 'agent-monitor', key: 'agents' } as const, { list: [], stale: false, at: 0 } as AgentSnapshot, { shape: 'agents-1' })
+const sessionsAtom = atom({ plugin: 'agent-monitor', key: 'sessions' } as const, { list: [], stale: false, at: 0 } as SessionsSnapshot, { shape: 'sessions-1' })
+const DEFAULT_REGISTRY = '/Users/indji/Documents/Lavoro/Claude/Projects/Indji/coordinatrice/sessioni.json'
 const selectedAtom = atom({ plugin: 'agent-monitor', key: 'selected' } as const, '', { shape: 'selected-1' })
 const PANE = 'agenti'
 
@@ -57,13 +60,18 @@ export function textSummary(rows: Row[], tot: TokenCounts & { turns: number }): 
 
 type Ctx = StateDollar & {
   agent: { list: () => Promise<readonly AgentLike[]> }
+  process: { run: (argv: string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number; stdout: string; stderr: string }> }
+  fs: { read: (path: string) => Promise<string> }
+  session: { id: () => Promise<string> }
   clock: { now: () => Promise<number>; every: (ms: number, fn: () => void) => Timer }
 }
 let timer: Timer | undefined
 let lastRender = 0
 
 // Rilegge l'elenco; se rifiuta tiene l'ultimo e segna "non aggiornato".
-async function refresh($: Ctx) {
+async function refresh($: Ctx, registryPath: string) {
+  // le sessioni non fanno mai fallire il refresh degli agenti
+  await refreshSessions($, registryPath).catch(() => {})
   try {
     const list = await $.agent.list()
     const at = await $.clock.now()
@@ -86,16 +94,33 @@ async function refresh($: Ctx) {
   }
 }
 
+// Legge `claude agents --json` e il registro; se il comando fallisce tiene la lista e segna stale.
+async function refreshSessions($: Ctx, registryPath: string): Promise<void> {
+  const at = await $.clock.now()
+  let live
+  try {
+    const r = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 5000 })
+    if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}`)
+    live = parseAgents(r.stdout)
+  } catch {
+    await update($, sessionsAtom, (s) => ({ ...s, stale: true, at }))
+    return
+  }
+  const registry = registryPath ? await $.fs.read(registryPath).then(parseRegistry, () => []) : []
+  const self = await $.session.id().catch(() => undefined)
+  await update($, sessionsAtom, () => ({ list: mergeSessions(live, registry, at, self), stale: false, at }))
+}
+
 function stopTimer() {
   timer?.cancel()
   timer = undefined
 }
 
-function startTimer($: Ctx, refreshMs: number) {
+function startTimer($: Ctx, refreshMs: number, registryPath: string) {
   if (timer) return
   timer = $.clock.every(refreshMs, async () => {
     try {
-      await refresh($)
+      await refresh($, registryPath)
       // Rete di sicurezza: se il pannello non viene più disegnato per 3 intervalli il timer si ferma.
       if ((await $.clock.now()) - lastRender > refreshMs * 3) stopTimer()
     } catch {
@@ -107,6 +132,7 @@ function startTimer($: Ctx, refreshMs: number) {
 export const register: Register = (on, options) => {
   const opts = options as Record<string, unknown> | undefined
   const limit = Number(opts?.alertTokens ?? 200000)
+  const registryPath = typeof opts?.sessionsRegistry === 'string' ? opts.sessionsRegistry : DEFAULT_REGISTRY
   const refreshMs = Math.max(500, Number(opts?.refreshMs ?? 2000) || 2000)
   on('session.start', async ($, e, next) => {
     stopTimer()
@@ -153,8 +179,8 @@ export const register: Register = (on, options) => {
     const opened = await $.ui.open({ id: PANE, title: 'Agenti', focus: true })
     if (opened.isPlaced) {
       lastRender = await $.clock.now()
-      await refresh($)
-      startTimer($, refreshMs)
+      await refresh($, registryPath)
+      startTimer($, refreshMs, registryPath)
       return {}
     }
     const now = await $.clock.now()
@@ -185,8 +211,8 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const now = await $.clock.now()
     lastRender = now
-    if ((await read($, agentsAtom)).at === 0) await refresh($)
-    startTimer($, refreshMs)
+    if ((await read($, agentsAtom)).at === 0) await refresh($, registryPath)
+    startTimer($, refreshMs, registryPath)
     const snap = await read($, agentsAtom)
     const usage = await read($, usageAtom)
     const rows = buildTree(snap.list, usage, now)

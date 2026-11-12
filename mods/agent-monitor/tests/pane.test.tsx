@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import type { SessionsSnapshot } from '../types'
 
 const PANE = {
   plugin: 'agent-monitor',
@@ -13,7 +14,7 @@ const AGENTS = [
   { id: 'a2', parentId: 'a1', status: 'completed', name: 'Figlio', description: 'Figlio desc', type: 't' },
 ]
 
-type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean }
+type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean; agentsJson?: string; failAgentsCmd?: boolean; registry?: string | null }
 const world = (on: On, cfg: Cfg = {}) => {
   mock.store(on)
   // serve a $.turn.complete(...) nei test che riempiono usage: senza handler terminale la chiamata non risolve
@@ -27,12 +28,32 @@ const world = (on: On, cfg: Cfg = {}) => {
     asks: [] as string[],
     stops: [] as unknown[],
     lists: 0,
+    runs: [] as { argv: readonly string[]; timeoutMs?: number }[],
+    reads: [] as string[],
+    sessions: undefined as SessionsSnapshot | undefined,
     clock,
   }
   on('agent.list', () => {
     st.lists++
     if (st.cfg.failList) throw new Error('giù')
     return { value: st.cfg.agents ?? AGENTS } as never
+  })
+  on('process.run', (_, e) => {
+    if (e.argv[0] !== 'claude') return { value: { exitCode: 1, stdout: '', stderr: 'no' } } as never
+    st.runs.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
+    if (st.cfg.failAgentsCmd) return { value: { exitCode: 1, stdout: '', stderr: 'boom' } } as never
+    return { value: { exitCode: 0, stdout: st.cfg.agentsJson ?? '[]', stderr: '' } } as never
+  })
+  on('fs.read', (_, e) => {
+    st.reads.push(e.path)
+    if (st.cfg.registry == null) throw new Error('ENOENT')
+    return { value: st.cfg.registry } as never
+  })
+  // ultimo valore scritto nell'atomo delle sessioni (il $ del test non legge lo stato)
+  on('state.set', async (_, e, next) => {
+    const w = e as unknown as { key: string; value: unknown }
+    if (w.key === 'sessions') st.sessions = (w.value as { value?: SessionsSnapshot }).value ?? (w.value as SessionsSnapshot)
+    return next(e)
   })
   on('ui.open', (_, e) => {
     st.opens.push(e)
@@ -403,4 +424,44 @@ test('riga main: token senza colore di soglia', { options: { alertTokens: 1000 }
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await tx(ui, 'tokens-main'))?.props.color).toBeUndefined()
   await ui.unmount()
+})
+
+const LIVE = JSON.stringify([{ id: 's1', name: 'indji-x', kind: 'background', cwd: '/p/x', state: 'working' }])
+const REG_DEFAULT = '/Users/indji/Documents/Lavoro/Claude/Projects/Indji/coordinatrice/sessioni.json'
+
+test('sessions refresh: legge claude agents --json e il registro', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  expect(st.runs[0]).toEqual({ argv: ['claude', 'agents', '--json'], timeoutMs: 5000 })
+  expect(st.reads).toEqual([REG_DEFAULT])
+  const snap = st.sessions!
+  expect(snap.stale).toBe(false)
+  expect(snap.list.find((s) => s.id === 's1')?.state).toBe('working')
+})
+
+test('sessions refresh: comando fallito tiene la lista e segna stale', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  const before = (st.sessions!).list
+  expect(before.length).toBe(1)
+  st.cfg.failAgentsCmd = true
+  await st.clock.advance(2000)
+  const snap = st.sessions!
+  expect(snap.list).toEqual(before)
+  expect(snap.stale).toBe(true)
+})
+
+test('sessions refresh: registro illeggibile', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: null })
+  await run($)
+  const snap = st.sessions!
+  expect(snap.stale).toBe(false)
+  expect(snap.list.map((s) => s.id)).toEqual(['s1'])
+})
+
+test('sessions refresh: opzione vuota', { options: { sessionsRegistry: '' } }, async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  expect(st.reads).toEqual([])
+  expect((st.sessions!).list.length).toBe(1)
 })

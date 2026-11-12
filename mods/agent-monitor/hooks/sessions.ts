@@ -1,9 +1,9 @@
 // Modello puro delle sessioni di progetto: nessuna chiamata al motore.
+import type { ProjectSession, SessionState } from '../types'
 
 export type LiveSession = { id: string; name: string; cwd: string; state?: string; status?: string; waitingFor?: string; sessionId?: string }
 export type RegistryEntry = { project: string; name: string; id: string; stato: string; ora?: string; esito?: string; esitoOra?: string }
-export type SessionState = 'blocked' | 'working' | 'idle' | 'closed'
-export type ProjectSession = { id: string; name: string; project: string; cwd?: string; state: SessionState; reason?: string; esito?: string; esitoOra?: string }
+export type { ProjectSession, SessionState }
 
 // Finestra in cui una sessione chiusa resta visibile (24 h)
 export const CLOSED_WINDOW_MS = 86_400_000
