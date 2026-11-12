@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
-import type { AgentSnapshot, AlertedMap, ContextSnapshot, ProjectSession, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
+import type { AgentSnapshot, AlertedMap, ContextSnapshot, ProjectSession, SessionContext, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
 import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setContext, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
 import type { AgentLike, Row } from './ledger'
-import { contextTokens, limitsFrom } from './context'
+import { contextFilePath, contextTokens, limitsFrom, zoneOf } from './context'
 import { attachCommand, isAttachId, mergeSessions, parseAgents, parseRegistry } from './sessions'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
@@ -83,7 +83,8 @@ export function textSummary(rows: Row[], tot: TokenCounts & { turns: number }): 
 type Ctx = StateDollar & {
   agent: { list: () => Promise<readonly AgentLike[]> }
   process: { run: (argv: string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number; stdout: string; stderr: string }> }
-  fs: { read: (path: string) => Promise<string> }
+  fs: { read: (path: string) => Promise<string>; write: (path: string, text: string) => Promise<void> }
+  env: { get: (name: string) => Promise<string | undefined> }
   session: { id: () => Promise<string>; usage: () => Promise<{ context: { tokens?: number; window: number; percent?: number } }> }
   config: { list: () => Promise<readonly { key: string; value: unknown }[]> }
   clock: { now: () => Promise<number>; every: (ms: number, fn: () => void) => Timer }
@@ -119,6 +120,21 @@ async function refreshContext($: Ctx) {
     limits: rows ? (limitsFrom(rows) ?? null) : c.limits,
     at: now,
   }))
+}
+
+// Scrive il contesto della sessione per le altre sessioni; fs.write crea le cartelle. Errori ignorati.
+async function publishContext($: Ctx) {
+  try {
+    const [home, id] = await Promise.all([$.env.get('HOME'), $.session.id()])
+    if (!home || !id) return
+    const [usage, rows, at] = await Promise.all([$.session.usage(), $.config.list().catch(() => []), $.clock.now()])
+    const limits = limitsFrom(rows)
+    const { tokens, window, percent } = usage.context
+    const ctx: SessionContext = { tokens, window, percent, zone: limits && percent !== undefined ? zoneOf(percent, limits) : null, at }
+    await $.fs.write(contextFilePath(home, id), JSON.stringify(ctx))
+  } catch {
+    // la pubblicazione non tocca la risposta del turno
+  }
 }
 
 async function refreshAgents($: Ctx) {
@@ -211,6 +227,7 @@ export const register: Register = (on, options) => {
       const list = await $.agent.list().catch(() => [] as readonly AgentLike[])
       for (const id of fresh) $.ui.toast(`Agente ${agentLabel(id, list)} oltre ${formatTokens(limit)} token`)
     }
+    if (e.agentId === undefined) void publishContext($)
     return r
   }).catch(($, e, next) => next(e))
 

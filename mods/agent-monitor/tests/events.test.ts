@@ -209,3 +209,54 @@ test('turn.step senza agentId: salva il modello sotto MAIN', async ($, on) => {
   expect(usage.main.ctxModel).toBe('opus')
   expect(usage.main.ctxTokens).toBe(15)
 })
+
+// Task 3: pubblicazione del contesto della sessione principale
+const ctxWorld = (on: On, opts: { cfg?: boolean; failWrite?: boolean } = {}) => {
+  world(on)
+  const writes: { path: string; text: string }[] = []
+  on('env.get', () => ({ value: '/home/u' }) as never)
+  on('session.id', () => ({ value: 's1' }) as never)
+  on('session.usage', () => ({ value: { context: { tokens: 470, window: 1000, percent: 47 } } }) as never)
+  on('config.list', () =>
+    ({ value: opts.cfg === false ? [] : [{ key: 'auto-clear-context.threshold', value: 40 }, { key: 'auto-clear-context.hardThreshold', value: 60 }] }) as never)
+  on('fs.write', (_, e) => {
+    writes.push({ path: (e as { path: string }).path, text: (e as { text: string }).text })
+    if (opts.failWrite) throw new Error('disco pieno')
+    return { value: undefined } as never
+  })
+  return writes
+}
+const flush = () => new Promise((r) => setTimeout(r, 20))
+
+test('turn.complete della principale scrive il file di contesto', async ($, on) => {
+  const writes = ctxWorld(on)
+  await $.turn.complete(turn(undefined, 1))
+  await flush()
+  expect(writes.length).toBe(1)
+  expect(writes[0].path).toBe('/home/u/.claude/agent-monitor/contesto/s1.json')
+  const j = JSON.parse(writes[0].text)
+  expect(j).toMatchObject({ percent: 47, zone: 1, window: 1000, tokens: 470 })
+  expect(typeof j.at).toBe('number')
+})
+
+test('turn.complete di un subagent non scrive', async ($, on) => {
+  const writes = ctxWorld(on)
+  await $.turn.complete(turn('a1', 1))
+  await flush()
+  expect(writes.length).toBe(0)
+})
+
+test('fs.write che rifiuta: turn.complete risponde comunque', async ($, on) => {
+  const writes = ctxWorld(on, { failWrite: true })
+  const r = (await $.turn.complete({ ...(turn(undefined, 1) as object), answer: 'ciao' } as never)) as { text: string }
+  await flush()
+  expect(writes.length).toBe(1)
+  expect(r.text).toBe('ciao')
+})
+
+test('senza auto-clear-context: zone null', async ($, on) => {
+  const writes = ctxWorld(on, { cfg: false })
+  await $.turn.complete(turn(undefined, 1))
+  await flush()
+  expect(JSON.parse(writes[0].text).zone).toBeNull()
+})
