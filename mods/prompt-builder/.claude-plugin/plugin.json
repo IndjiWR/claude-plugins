@@ -1,6 +1,6 @@
 {
   "name": "prompt-builder",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Prima che un prompt lungo arrivi alla sessione, lo trasforma in un brief chiaro con intervista e proposte approvate; ottimizza i consumi.",
   "author": { "name": "Indji" },
   "userConfig": {
