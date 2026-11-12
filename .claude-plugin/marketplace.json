@@ -1,0 +1,12 @@
+{
+  "name": "indji-plugins",
+  "owner": { "name": "IndjiWR" },
+  "description": "Skill e mod per Claude Code di IndjiWR.",
+  "plugins": [
+    {
+      "name": "auto-clear-context",
+      "source": "./mods/auto-clear-context/mod",
+      "description": "Vicino alle soglie di contesto Claude salva lo stato in un handoff validato; la mod esegue /clear e fa ripartire il lavoro nella sessione pulita."
+    }
+  ]
+}
