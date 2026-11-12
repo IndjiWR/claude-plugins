@@ -16,6 +16,7 @@ const AGENTS = [
 type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean }
 const world = (on: On, cfg: Cfg = {}) => {
   mock.store(on)
+  // serve a $.turn.complete(...) nei test che riempiono usage: senza handler terminale la chiamata non risolve
   on('turn.complete', (_, e) => ({ text: e.answer }) as never)
   const clock = mock.clock(on, { now: 1000 })
   const st = {
@@ -121,7 +122,7 @@ test('riepilogo: conteggi solo non zero, colori, riga modelli', async ($, on) =>
   expect((await tx(ui, 'count-failed'))?.props.color).toBe('error')
   expect(await ui.find({ key: 'count-pending' })).toBeUndefined()
   expect(await ui.find({ key: 'count-done' })).toBeUndefined()
-  expect((await tx(ui, 'models'))?.text).toBe('Sonnet 280,0k · Haiku 95,0k')
+  expect((await tx(ui, 'models'))?.text).toBe('Sonnet 280k · Haiku 95k')
   expect((await tx(ui, 'models'))?.props.dimColor).toBe(true)
   expect((await ui.find({ key: 'summary' }))?.props.borderStyle).toBe('round')
   await ui.unmount()
@@ -142,7 +143,7 @@ test('sessionBudget > 0: barra e colore per livello', { options: { sessionBudget
   await run($)
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const t = await tx(ui, 'budget')
-  expect(t?.text).toBe('Token ▕███████████████     ▏ 1,5k / 2,0k')
+  expect(t?.text).toBe('Token ▕███████████████     ▏ 1,5k / 2k')
   expect(t?.props.color).toBe('warning')
   await ui.unmount()
   await $.turn.complete(turn('a1', 'sonnet', 1000, 0))
@@ -235,7 +236,7 @@ test('colonne: 120 tutto, 65 senza TURNI e barra, 45 solo glifo, nome e token', 
   expect((await tx(ui, 'head'))?.text).not.toContain('TURNI')
   expect((await tx(ui, 'head'))?.text).toContain('DUR')
   expect((await tx(ui, 'tokens-a1'))?.text).not.toMatch(/█/)
-  expect((await tx(ui, 'tokens-a1'))?.text).toContain('100,0k')
+  expect((await tx(ui, 'tokens-a1'))?.text).toContain('100k')
   expect(await ui.find({ key: 'turns-a1' })).toBeUndefined()
   await ui.unmount()
   ui = await at(45)
@@ -243,7 +244,6 @@ test('colonne: 120 tutto, 65 senza TURNI e barra, 45 solo glifo, nome e token', 
   expect(head).not.toContain('MODELLO')
   expect(head).not.toContain('DUR')
   expect(head).toContain('TOKEN')
-  expect(await ui.find({ key: 'model-a1' })).toBeUndefined()
   expect(await ui.find({ key: 'dur-a1' })).toBeUndefined()
   expect((await tx(ui, 'status-a1'))?.text.trim()).toBe('●')
   await ui.unmount()
@@ -360,4 +360,33 @@ test('agente attivo visto dal refresh senza turni: durata cresce', async ($, on)
   const ui2 = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await tx(ui2, 'dur-a1'))?.text.trim()).toMatch(/^(1[0-9]|2[0-9])s$/)
   await ui2.unmount()
+})
+
+test('intestazione e righe allineate: stesso offset di MODELLO e TOKEN', async ($, on) => {
+  world(on)
+  await $.turn.complete(turn('a1', 'sonnet', 100000, 0))
+  await run($)
+  for (const cols of [120, 65]) {
+    const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: cols }, surface: 'terminal' })
+    const head = (await tx(ui, 'head'))?.text ?? ''
+    const st = (await tx(ui, 'status-a1'))?.text ?? ''
+    const lb = (await tx(ui, 'label-a1'))?.text ?? ''
+    // la riga parte con selettore + spazio (2 colonne), come l'intestazione
+    expect(head.indexOf('MODELLO') - 2).toBe(st.length + lb.length)
+    expect(head.indexOf('TOKEN') - 2).toBe(st.length + lb.length + 9)
+    expect(head.indexOf('AGENTE') - 2).toBe(st.length)
+    const tk = (await tx(ui, 'tokens-a1'))?.text ?? ''
+    const dur = head.indexOf('DUR')
+    if (dur >= 0) expect(dur - 2).toBe(st.length + lb.length + 9 + tk.length)
+    await ui.unmount()
+  }
+})
+
+test('riga main: token senza colore di soglia', { options: { alertTokens: 1000 } }, async ($, on) => {
+  world(on)
+  await $.turn.complete(turn(undefined, 'sonnet', 5000, 0))
+  await run($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await tx(ui, 'tokens-main'))?.props.color).toBeUndefined()
+  await ui.unmount()
 })

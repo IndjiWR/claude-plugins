@@ -179,12 +179,30 @@ export function tokensByModel(usage: UsageMap): Array<{ model: string; tokens: n
 
 const PARTIAL = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
 
+/** Formato compatto per il pannello: 950, 1,5k, 2k, 280k, 1,2M, 12M. */
+export function formatCompact(v: number): string {
+  const unit = (x: number, suffix: string) => {
+    if (x >= 10) return `${Math.round(x)}${suffix}`
+    const r = Math.round(x * 10) / 10
+    return Number.isInteger(r) ? `${r}${suffix}` : `${dec(r)}${suffix}`
+  }
+  if (v < 1000) return String(Math.round(v))
+  if (v < 1e6) {
+    const k = v / 1000
+    // 9,96k arrotonda a 10k: passa dal ramo "intero".
+    return k < 9.95 ? unit(k, 'k') : `${Math.round(k) >= 1000 ? '1M' : Math.round(k) + 'k'}`
+  }
+  const m = v / 1e6
+  return m < 9.95 ? unit(m, 'M') : `${Math.round(m)}M`
+}
+
 export function bar(value: number, max: number, width: number): string {
   const w = Math.max(0, Math.floor(width))
   if (!(max > 0) || !(value > 0)) return ' '.repeat(w)
   const cells = Math.min(1, value / max) * w
   const full = Math.floor(cells)
-  const part = full < w ? PARTIAL[Math.floor((cells - full) * 8)] : ''
+  const idx = Math.floor((cells - full) * 8)
+  const part = full < w ? PARTIAL[full === 0 && idx === 0 ? 1 : idx] : ''
   return ('█'.repeat(full) + part).padEnd(w, ' ')
 }
 

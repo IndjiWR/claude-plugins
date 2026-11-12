@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
 import type { AgentSnapshot, AlertedMap, TokenCounts, UsageMap } from '../types'
-import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatDuration, formatTokens, overThreshold, seedAgent, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
+import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
 import type { AgentLike, Row } from './ledger'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
@@ -197,9 +197,35 @@ export const register: Register = (on, options) => {
     // Colonne: < 70 niente TURNI né barra; < 50 solo glifo, nome e token.
     const narrow = cols < 70
     const tiny = cols < 50
-    const W = { status: tiny ? 2 : 8, model: 8, tok: narrow ? 7 : 14, dur: 8, turns: 5 }
-    const fixed = 2 + W.status + W.tok + (tiny ? 0 : W.model + W.dur) + (narrow ? 0 : W.turns)
-    const labelW = Math.max(8, cols - fixed - 1)
+    // Una sola definizione di colonne per intestazione e righe: stessa larghezza, il gap è l'ultima cella di ogni colonna.
+    type Col = { id: string; header: string; w: number; keyed: boolean; text: (r: Row, i: number) => string; color?: (r: Row) => string | undefined }
+    const tokenOf = (r: Row) => r.tokens.input + r.tokens.output
+    const statusCol: Col = {
+      id: 'status',
+      header: 'STATO',
+      w: tiny ? 2 : 8,
+      keyed: true,
+      text: (r) => {
+        const v = STATUS_VIEW[r.status] ?? { glyph: '?', label: r.status, color: 'subtle' }
+        return tiny ? v.glyph : `${v.glyph} ${v.label}`
+      },
+      color: (r) => (STATUS_VIEW[r.status] ?? { color: 'subtle' }).color,
+    }
+    const tail: Col[] = []
+    if (!tiny) tail.push({ id: 'model', header: 'MODELLO', w: 9, keyed: false, text: (r) => (r.model ? shortModel(r.model) : '—') })
+    tail.push({
+      id: 'tokens',
+      header: 'TOKEN',
+      w: narrow ? 8 : 15,
+      keyed: true,
+      text: (r) => (narrow ? formatCompact(tokenOf(r)) : `${bar(tokenOf(r), limit, 6)} ${formatCompact(tokenOf(r))}`),
+      color: (r) => (r.id === MAIN ? undefined : LEVEL_COLOR[usageLevel(tokenOf(r), limit)]),
+    })
+    if (!tiny) tail.push({ id: 'dur', header: 'DUR', w: 9, keyed: true, text: (r) => formatDuration(r.durationMs) })
+    if (!narrow) tail.push({ id: 'turns', header: 'TURNI', w: 6, keyed: true, text: (r) => String(r.turns) })
+    const labelW = Math.max(9, cols - 2 - statusCol.w - tail.reduce((n, c) => n + c.w, 0))
+    const columns: Col[] = [statusCol, { id: 'label', header: 'AGENTE', w: labelW, keyed: true, text: (r, i) => treePrefix(rows, i) + r.label }, ...tail]
+    const cell = (text: string, w: number) => fit(text, w - 1) + ' '
 
     const cnt = countByStatus(rows)
     const groups = [
@@ -211,14 +237,8 @@ export const register: Register = (on, options) => {
     ].filter((g) => g.n > 0)
     const budget = Number(opts?.sessionBudget ?? 0) || 0
     const level = LEVEL_COLOR[usageLevel(total, budget)]
-    const budgetText = budget > 0 ? `Token ▕${bar(total, budget, 20)}▏ ${formatTokens(total)} / ${formatTokens(budget)}` : `Token ${formatTokens(total)}`
+    const budgetText = budget > 0 ? `Token ▕${bar(total, budget, 20)}▏ ${formatCompact(total)} / ${formatCompact(budget)}` : `Token ${formatCompact(total)}`
     const models = tokensByModel(usage).filter((m) => m.tokens > 0)
-
-    const head = ['', fit('STATO', W.status), fit('AGENTE', labelW + 1)]
-    if (!tiny) head.push(fit('MODELLO', W.model))
-    head.push(fit('TOKEN', W.tok))
-    if (!tiny) head.push(fit('DUR', W.dur))
-    if (!narrow) head.push(fit('TURNI', W.turns))
 
     const stop = async (r: Row) => {
       let answer: string
@@ -253,21 +273,17 @@ export const register: Register = (on, options) => {
           </Text></Box>
           {models.length > 0 && (
             <Box key="models"><Text dimColor>
-              {models.map((m) => `${cap(m.model)} ${formatTokens(m.tokens)}`).join(' · ')}
+              {models.map((m) => `${cap(m.model)} ${formatCompact(m.tokens)}`).join(' · ')}
             </Text></Box>
           )}
         </Box>
         {snap.stale && <Text color="warning">elenco non aggiornato</Text>}
         <Box key="head"><Text dimColor bold>
-          {'  ' + head.slice(1).join(' ')}
+          {'  ' + columns.map((c) => cell(c.header, c.w)).join('')}
         </Text></Box>
         {rows.map((r, i) => {
           const picked = r.id === selId
-          const v = STATUS_VIEW[r.status] ?? { glyph: '?', label: r.status, color: 'subtle' }
           const style = { dimColor: FINISHED.has(r.status) || undefined, bold: picked || undefined, inverse: picked || undefined }
-          const t = r.tokens.input + r.tokens.output
-          const tokColor = LEVEL_COLOR[usageLevel(t, limit)]
-          const tokText = narrow ? formatTokens(t) : `${bar(t, limit, 6)} ${formatTokens(t)}`
           return (
             <Box key={`row-${r.id}`} flexDirection="row">
               <Button
@@ -279,30 +295,14 @@ export const register: Register = (on, options) => {
                 }}
               />
               <Text> </Text>
-              <Box key={`status-${r.id}`}><Text color={v.color} {...style}>
-                {fit(tiny ? v.glyph : `${v.glyph} ${v.label}`, W.status)}
-              </Text></Box>
-              <Box key={`label-${r.id}`}><Text {...style}>
-                {fit(treePrefix(rows, i) + r.label, labelW + 1)}
-              </Text></Box>
-              {!tiny && (
-                <Box key={`model-${r.id}`}><Text {...style}>
-                  {fit(r.model ? shortModel(r.model) : '—', W.model)}
-                </Text></Box>
-              )}
-              <Box key={`tokens-${r.id}`}><Text color={tokColor} {...style}>
-                {fit(tokText, W.tok)}
-              </Text></Box>
-              {!tiny && (
-                <Box key={`dur-${r.id}`}><Text {...style}>
-                  {fit(formatDuration(r.durationMs), W.dur)}
-                </Text></Box>
-              )}
-              {!narrow && (
-                <Box key={`turns-${r.id}`}><Text {...style}>
-                  {fit(String(r.turns), W.turns)}
-                </Text></Box>
-              )}
+              {columns.map((c) => {
+                const t = (
+                  <Text key={c.id} color={c.color?.(r)} {...style}>
+                    {cell(c.text(r, i), c.w)}
+                  </Text>
+                )
+                return c.keyed ? <Box key={`${c.id}-${r.id}`}>{t}</Box> : t
+              })}
             </Box>
           )
         })}
@@ -322,7 +322,7 @@ export const register: Register = (on, options) => {
               {ACTIVE.has(sel.status) && <Button key={`stop-${sel.id}`} label="Ferma" onPress={() => stop(sel)} />}
             </Box>
             <Box key="detail"><Text dimColor>
-              {`in ${formatTokens(sel.tokens.input)} · out ${formatTokens(sel.tokens.output)} · cache ${formatTokens(sel.tokens.cacheRead)}+${formatTokens(sel.tokens.cacheWrite)}`}
+              {`in ${formatCompact(sel.tokens.input)} · out ${formatCompact(sel.tokens.output)} · cache ${formatCompact(sel.tokens.cacheRead)}+${formatCompact(sel.tokens.cacheWrite)}`}
             </Text></Box>
           </Box>
         ) : (

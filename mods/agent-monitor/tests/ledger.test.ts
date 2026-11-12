@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addTurn, bar, buildTree, countByStatus, tokensByModel, usageLevel, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from '../hooks/ledger'
+import { addTurn, bar, buildTree, formatCompact, countByStatus, tokensByModel, usageLevel, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from '../hooks/ledger'
 import type { AgentLike } from '../hooks/ledger'
 import type { UsageMap } from '../types'
 
@@ -138,4 +138,16 @@ test('usageLevel soglie', () => {
   expect(usageLevel(70, 100)).toBe('warn')
   expect(usageLevel(99, 100)).toBe('warn')
   expect(usageLevel(100, 100)).toBe('over')
+})
+
+test('bar: valore non zero sotto 1/8 di cella mostra almeno ▏', () => {
+  expect(bar(1, 200000, 6)).toBe('▏     ')
+  expect(bar(0, 200000, 6)).toBe('      ')
+})
+
+test('formatCompact: confini', () => {
+  const c = formatCompact
+  expect([c(0), c(999), c(1000), c(1500), c(2000), c(9949)]).toEqual(['0', '999', '1k', '1,5k', '2k', '9,9k'])
+  expect([c(9960), c(10000), c(280000), c(999499), c(999600)]).toEqual(['10k', '10k', '280k', '999k', '1M'])
+  expect([c(1e6), c(1.2e6), c(9.96e6), c(12e6)]).toEqual(['1M', '1,2M', '10M', '12M'])
 })
