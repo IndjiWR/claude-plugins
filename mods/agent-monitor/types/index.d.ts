@@ -2,11 +2,16 @@
 export type SessionState = 'blocked' | 'working' | 'idle' | 'closed'
 export type ProjectSession = { id: string; name: string; project: string; cwd?: string; state: SessionState; reason?: string; esito?: string; esitoOra?: string }
 export type TokenCounts = { input: number; output: number; cacheRead: number; cacheWrite: number }
-export type AgentUsage = TokenCounts & { model?: string; turns: number; firstAt: number; lastAt: number }
+export type AgentUsage = TokenCounts & { model?: string; turns: number; firstAt: number; lastAt: number; ctxTokens?: number; ctxModel?: string; ctxAt?: number }
 export type UsageMap = Record<string, AgentUsage>
 export type AgentSnapshot = { list: { id: string; parentId?: string; status: string; name?: string; description: string; type: string }[]; stale: boolean; at: number }
 export type SessionsSnapshot = { list: ProjectSession[]; stale: boolean; at: number }
 export type AlertedMap = Record<string, true>
+export type Limits = { soft: number; hard: number; margin: number }
+export type Zone = 0 | 1 | 2 | 3
+export type CtxValue = { percent?: number; tokens?: number; zone?: Zone }
+export type MainContext = { tokens?: number; window: number; percent?: number }
+export type SessionContext = { tokens?: number; window?: number; percent?: number; zone: Zone | null; at: number }
 
 declare module 'claude-code' {
   interface PluginState {
