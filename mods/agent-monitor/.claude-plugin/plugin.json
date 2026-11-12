@@ -1,0 +1,21 @@
+{
+  "name": "agent-monitor",
+  "version": "0.1.0",
+  "description": "Pannello live degli agenti della sessione: stato, modello, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma.",
+  "author": { "name": "Indji" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "alertTokens": {
+      "type": "number",
+      "title": "Soglia token per agente",
+      "description": "Quando un agente supera questi token totali compare un avviso. 0 spegne l'allarme.",
+      "default": 200000
+    },
+    "refreshMs": {
+      "type": "number",
+      "title": "Aggiornamento (ms)",
+      "description": "Ogni quanti millisecondi il pannello si aggiorna. Minimo 500.",
+      "default": 2000
+    }
+  }
+}
