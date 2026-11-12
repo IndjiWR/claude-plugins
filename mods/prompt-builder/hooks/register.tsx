@@ -25,7 +25,7 @@ const fallbackNote = (reason: string) =>
   `Il prompt-builder non ha potuto comporre il brief (${reason}): usa la skill prompt-builder:prompt-builder per chiarire obiettivo, criteri e metodo prima di iniziare.`
 
 // Mai lanciare: ogni errore diventa il ramo di ripiego, il prompt non va perso.
-async function build($: any, text: string, cfg: Config): Promise<PipelineResult & { root?: string }> {
+async function build($: any, text: string, cfg: Config): Promise<PipelineResult & { root?: string; createdGlobal?: boolean }> {
   try {
     const io: FileIO = {
       read: async path => {
@@ -41,7 +41,14 @@ async function build($: any, text: string, cfg: Config): Promise<PipelineResult 
     }
     const root: string = await $.session.root()
     const home: string | undefined = await $.env.get('HOME')
-    const { text: guidelines } = await loadGuidelines(io, { pluginRoot: $.plugin.root, home, projectRoot: root })
+    const { text: guidelines, createdGlobal } = await loadGuidelines(io, { pluginRoot: $.plugin.root, home, projectRoot: root })
+    if (createdGlobal && home) {
+      try {
+        $.ui.log(`prompt-builder: creata la linea guida globale in ${home}/.claude/prompt-builder/linea-guida.md`)
+      } catch {
+        /* ignorato */
+      }
+    }
     const template = (await io.read(`${$.plugin.root}/assets/brief-template.md`)) ?? ''
     const ask: AskFn = async (question, opts) => {
       try {
@@ -82,9 +89,8 @@ async function archive($: any, original: string, r: Extract<PipelineResult, { ki
       }
     }
     const s = r.stats
-    const tokens = s.usage.input + s.usage.output + s.usage.cacheRead + s.usage.cacheWrite
     $.ui.log(
-      `prompt-builder: brief pronto (taglia ${s.taglia}, ${s.domande} domande, proposte ${s.proposteAccettate}/${s.proposteTotali}, ${tokens} token)`,
+      `prompt-builder: brief pronto (taglia ${s.taglia}, ${s.domande} domande, proposte ${s.proposteAccettate}/${s.proposteTotali}, token: input ${s.usage.input}, output ${s.usage.output}, cache letta ${s.usage.cacheRead}, cache scritta ${s.usage.cacheWrite})`,
     )
   } catch {
     /* ignorato */
@@ -97,14 +103,14 @@ async function runCommand($: any, text: string, cfg: Config): Promise<void> {
     const r = await build($, text, cfg)
     if (r.kind === 'brief') {
       await archive($, text, r, r.root ?? '')
-      await $.prompt.submit({ text: r.text })
+      await $.prompt.submit({ text: r.text, asUser: true })
     } else if (r.kind === 'fallback') {
-      await $.prompt.submit({ text: `${text}\n\n[${fallbackNote(r.reason)}]` })
+      await $.prompt.submit({ text: `${text}\n\n[${fallbackNote(r.reason)}]`, asUser: true })
     } else {
-      await $.prompt.submit({ text })
+      await $.prompt.submit({ text, asUser: true })
     }
   } catch {
-    await $.prompt.submit({ text }).catch(() => undefined)
+    await $.prompt.submit({ text, asUser: true }).catch(() => undefined)
   }
 }
 

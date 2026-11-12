@@ -65,3 +65,18 @@ test('home assente', async () => {
   expect(r.createdGlobal).toBe(false)
   expect(writes.length).toBe(0)
 })
+
+test('scrittura globale fallita: prosegue col testo predefinito', async () => {
+  const { io } = fakeIO({ [DEFAULT_PATH]: 'DEFAULT' })
+  const failing: FileIO = { read: io.read, write: async () => { throw new Error('EACCES') } }
+  const r = await loadGuidelines(failing, paths)
+  expect(r.text).toContain('DEFAULT')
+  expect(r.createdGlobal).toBe(false)
+})
+
+test('testo predefinito vuoto: nessuna scrittura globale', async () => {
+  const { io, writes } = fakeIO({})
+  const r = await loadGuidelines(io, paths)
+  expect(writes.length).toBe(0)
+  expect(r.createdGlobal).toBe(false)
+})

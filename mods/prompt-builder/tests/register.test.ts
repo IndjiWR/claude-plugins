@@ -139,6 +139,7 @@ test('/prompt-builder testo: nessuna conferma, submit con il brief', async ($, o
   expect(st.asks.includes('Ottimizzo il prompt?')).toBe(false)
   expect(st.prompts.length).toBe(1)
   expect(st.prompts[0].text.includes('# Brief: login')).toBe(true)
+  expect(JSON.stringify(st.prompts[0])).toContain('asUser')
 })
 
 test('/prompt-builder senza testo: uso, nessuna ask', async ($, on) => {

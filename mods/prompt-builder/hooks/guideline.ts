@@ -19,8 +19,14 @@ export async function loadGuidelines(
     const globalPath = `${paths.home}/.claude/prompt-builder/linea-guida.md`
     const existing = await io.read(globalPath)
     if (existing === undefined) {
-      await io.write(globalPath, defaultText)
-      createdGlobal = true
+      if (defaultText !== '') {
+        try {
+          await io.write(globalPath, defaultText)
+          createdGlobal = true
+        } catch {
+          /* scrittura best-effort: si prosegue col testo predefinito */
+        }
+      }
     } else {
       text = existing
     }
