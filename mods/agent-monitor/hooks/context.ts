@@ -5,7 +5,7 @@ import { formatCompact } from './ledger'
 export type { CtxValue, Limits, MainContext, SessionContext, Zone }
 
 export const ZONE_SHORT: readonly string[] = ['nor', 'mor', 'dur', 'mar']
-export const ZONE_LONG: readonly string[] = ['normale', 'morbida', 'dura', 'margine']
+export const ZONE_LONG: readonly string[] = ['zona normale', 'zona morbida', 'zona dura', 'margine di sicurezza superato']
 
 const num = (rows: readonly { key: string; value: unknown }[], key: string): number | undefined => {
   const v = rows.find(r => r.key === key)?.value
@@ -51,13 +51,13 @@ export function agentValue(u: AgentUsage | undefined, mainWindow: number | undef
 }
 
 export function ctxCell(v: CtxValue): string {
-  if (v.percent !== undefined) return v.zone ? `${v.percent}% ${ZONE_SHORT[v.zone]}` : `${v.percent}%`
+  if (v.percent !== undefined) return v.zone !== undefined ? `${v.percent}% ${ZONE_SHORT[v.zone]}` : `${v.percent}%`
   if (v.tokens !== undefined) return formatCompact(v.tokens)
   return '—'
 }
 
 export function ctxText(v: CtxValue): string {
-  if (v.percent !== undefined) return v.zone ? `ctx ${v.percent}% (zona ${ZONE_LONG[v.zone]})` : `ctx ${v.percent}%`
+  if (v.percent !== undefined) return v.zone !== undefined ? `ctx ${v.percent}% (${ZONE_LONG[v.zone]})` : `ctx ${v.percent}%`
   if (v.tokens !== undefined) return `ctx ${formatCompact(v.tokens)}`
   return ''
 }
