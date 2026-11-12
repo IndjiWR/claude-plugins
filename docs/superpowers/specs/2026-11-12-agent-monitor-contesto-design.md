@@ -23,7 +23,8 @@ auto-clear-context è configurata, la zona (normale / morbida / dura / margine).
    proprio in `~/.claude/agent-monitor/contesto/<sessionId>.json` (`HOME` da `$.env.get`):
    `{ "tokens": n, "window": n, "percent": n, "zone": 0-3 | null, "at": ms }`, a ogni `turn.complete` della
    principale (scrittura best-effort, errori ignorati). Il pannello, nella lettura delle sessioni (al più ogni
-   10 s), legge il file del `sessionId` di ogni sessione viva o chiusa; manca o non valido → nessun dato.
+   10 s), legge il file del `sessionId` di ogni sessione viva (le chiuse viste solo nel registro non hanno `sessionId`:
+   nessun dato); manca o non valido → nessun dato.
    Serve agent-monitor installato nelle sessioni di progetto (scope utente: già così).
 4. **Soglie**: `$.config.list()`, righe `auto-clear-context.threshold` e `auto-clear-context.hardThreshold`
    (numeri). Assenti → nessuna zona, solo percentuale. Lette al più ogni 10 s insieme alle sessioni.
