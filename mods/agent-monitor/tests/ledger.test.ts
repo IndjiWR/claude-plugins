@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addTurn, agentLabel, bar, buildTree, formatCompact, countByStatus, tokensByModel, usageLevel, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from '../hooks/ledger'
+import { addTurn, agentLabel, bar, buildTree, formatCompact, countByStatus, tokensByModel, usageLevel, formatDuration, formatTokens, overThreshold, seedAgent, setContext, setModel, totals } from '../hooks/ledger'
 import type { AgentLike } from '../hooks/ledger'
 import type { UsageMap } from '../types'
 
@@ -156,4 +156,14 @@ test('formatCompact: confini', () => {
   expect([c(0), c(999), c(1000), c(1500), c(2000), c(9949)]).toEqual(['0', '999', '1k', '1,5k', '2k', '9,9k'])
   expect([c(9960), c(10000), c(280000), c(999499), c(999600)]).toEqual(['10k', '10k', '280k', '999k', '1M'])
   expect([c(1e6), c(1.2e6), c(9.96e6), c(12e6)]).toEqual(['1M', '1,2M', '10M', '12M'])
+})
+
+test('setContext su mappa vuota crea la voce', () => {
+  const m = setContext({}, 'a', 1234, 'sonnet', 50)
+  expect(m.a).toMatchObject({ ctxTokens: 1234, ctxModel: 'sonnet', ctxAt: 50, turns: 0, input: 0, firstAt: 50 })
+})
+
+test('setContext su voce esistente conserva i cumulati', () => {
+  const m = setContext({ a: u({ input: 10, output: 5, turns: 3 }) }, 'a', 99, 'opus', 70)
+  expect(m.a).toMatchObject({ input: 10, output: 5, turns: 3, ctxTokens: 99, ctxModel: 'opus', ctxAt: 70 })
 })

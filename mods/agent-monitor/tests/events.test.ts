@@ -9,6 +9,11 @@ const summary = async ($: { command: { run: (i: never) => Promise<unknown> } }) 
 
 const world = (on: On, agents: unknown[] = []) => {
   mock.store(on)
+  sets = []
+  on('state.set', (_, e, next) => {
+    sets.push(e as never)
+    return next(e)
+  })
   on('turn.complete', (_, e) => ({ text: e.answer }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
   const st = { failList: false, t: 1000, step: 10, toasts: [] as string[], views: [] as unknown[], registered: [] as unknown[], spawnId: 'new1' }
@@ -136,4 +141,71 @@ test('/agenti testo: agent.list rifiuta -> ultimo elenco e nota', async ($, on) 
   const r = (await $.command.run({ command: 'agenti', args: '' } as never)) as { text: string }
   expect(r.text).toContain('Sessione principale')
   expect(r.text).toContain('elenco non aggiornato')
+})
+
+const stepUsage = (input: number, model: string, cr = 0, cc = 0) => ({ model, input_tokens: input, output_tokens: 1, cache_read_input_tokens: cr, cache_creation_input_tokens: cc })
+const stepRes = (usage: unknown) => ({ turnId: 't', index: 0, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage }) as never
+const stepIn = (agentId?: string) => ({ turnId: 't', index: 0, model: 'm', messageCount: 1, agentId }) as never
+
+// Stato letto passando dal comando /agenti non basta (il contesto non è ancora mostrato): si intercettano le scritture.
+const usageOf = async (_$: unknown) => lastUsage()
+let sets: Array<{ key: string; value: unknown }> = []
+const lastUsage = () => {
+  const w = [...sets].reverse().find((x) => x.key === 'usage')
+  const v = w?.value as { value?: unknown } | undefined
+  return (v && typeof v === 'object' && 'value' in v ? v.value : v) ?? {}
+}
+
+async function runStep($: { turn: { step: (i: never) => AsyncGenerator<unknown, unknown> } }, input: never) {
+  const it = $.turn.step(input)
+  for (;;) {
+    const r = await it.next()
+    if (r.done) return r.value
+  }
+}
+
+test('turn.step di un subagent salva il contesto dell ultima richiesta', async ($, on) => {
+  world(on)
+  let u: unknown = stepUsage(100, 'sonnet', 50, 20)
+  on('turn.step', async function* () {
+    return stepRes(u)
+  })
+  await runStep($ as never, stepIn('a1'))
+  u = stepUsage(300, 'haiku', 1000, 200)
+  await runStep($ as never, stepIn('a1'))
+  const usage = (await usageOf($)) as Record<string, { ctxTokens: number; ctxModel: string }>
+  expect(usage.a1.ctxTokens).toBe(1500)
+  expect(usage.a1.ctxModel).toBe('haiku')
+})
+
+test('turn.step con usage null: nessun aggiornamento e risultato invariato', async ($, on) => {
+  world(on)
+  const res = stepRes(null)
+  on('turn.step', async function* () {
+    return res
+  })
+  const r = await runStep($ as never, stepIn('a1'))
+  expect(r).toEqual(res)
+  const usage = (await usageOf($)) as Record<string, unknown>
+  expect(usage.a1).toBeUndefined()
+})
+
+test('turn.step: il risultato di next torna identico', async ($, on) => {
+  world(on)
+  const res = stepRes(stepUsage(5, 'sonnet'))
+  on('turn.step', async function* () {
+    return res
+  })
+  expect(await runStep($ as never, stepIn('a1'))).toEqual(res)
+})
+
+test('turn.step senza agentId: salva il modello sotto MAIN', async ($, on) => {
+  world(on)
+  on('turn.step', async function* () {
+    return stepRes(stepUsage(10, 'opus', 5))
+  })
+  await runStep($ as never, stepIn(undefined))
+  const usage = (await usageOf($)) as Record<string, { ctxModel: string; ctxTokens: number }>
+  expect(usage.main.ctxModel).toBe('opus')
+  expect(usage.main.ctxTokens).toBe(15)
 })

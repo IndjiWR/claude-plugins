@@ -1,16 +1,18 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
-import type { AgentSnapshot, AlertedMap, ProjectSession, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
-import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
+import type { AgentSnapshot, AlertedMap, ContextSnapshot, ProjectSession, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
+import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setContext, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
 import type { AgentLike, Row } from './ledger'
+import { contextTokens, limitsFrom } from './context'
 import { attachCommand, isAttachId, mergeSessions, parseAgents, parseRegistry } from './sessions'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
-const usageAtom = atom({ plugin: 'agent-monitor', key: 'usage' } as const, {} as UsageMap, { shape: 'usage-1' })
+export const usageAtom = atom({ plugin: 'agent-monitor', key: 'usage' } as const, {} as UsageMap, { shape: 'usage-1' })
 const alertedAtom = atom({ plugin: 'agent-monitor', key: 'alerted' } as const, {} as AlertedMap, { shape: 'alerted-1' })
 const agentsAtom = atom({ plugin: 'agent-monitor', key: 'agents' } as const, { list: [], stale: false, at: 0 } as AgentSnapshot, { shape: 'agents-1' })
 const sessionsAtom = atom({ plugin: 'agent-monitor', key: 'sessions' } as const, { list: [], stale: false, at: 0 } as SessionsSnapshot, { shape: 'sessions-1' })
+const contextAtom = atom({ plugin: 'agent-monitor', key: 'context' } as const, { limits: null, at: 0 } as ContextSnapshot, { shape: 'context-1' })
 const DEFAULT_REGISTRY = '/Users/indji/Documents/Lavoro/Claude/Projects/Indji/coordinatrice/sessioni.json'
 const selectedAtom = atom({ plugin: 'agent-monitor', key: 'selected' } as const, '', { shape: 'selected-1' })
 const PANE = 'agenti'
@@ -82,18 +84,20 @@ type Ctx = StateDollar & {
   agent: { list: () => Promise<readonly AgentLike[]> }
   process: { run: (argv: string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number; stdout: string; stderr: string }> }
   fs: { read: (path: string) => Promise<string> }
-  session: { id: () => Promise<string> }
+  session: { id: () => Promise<string>; usage: () => Promise<{ context: { tokens?: number; window: number; percent?: number } }> }
+  config: { list: () => Promise<readonly { key: string; value: unknown }[]> }
   clock: { now: () => Promise<number>; every: (ms: number, fn: () => void) => Timer }
 }
 let timer: Timer | undefined
 let lastRender = 0
 let lastSessionsRead: number | undefined
+let lastLimitsRead: number | undefined
 const SESSIONS_MIN_MS = 10_000
 
 // Rilegge l'elenco; se rifiuta tiene l'ultimo e segna "non aggiornato".
 async function refresh($: Ctx, registryPath: string) {
   // in parallelo; le sessioni non fanno mai fallire il refresh degli agenti
-  await Promise.all([refreshAgents($), maybeRefreshSessions($, registryPath).catch(() => {})])
+  await Promise.all([refreshAgents($), maybeRefreshSessions($, registryPath).catch(() => {}), refreshContext($).catch(() => {})])
 }
 
 // Le sessioni si rileggono al più ogni SESSIONS_MIN_MS (il primo giro subito).
@@ -102,6 +106,19 @@ async function maybeRefreshSessions($: Ctx, registryPath: string) {
   if (lastSessionsRead !== undefined && now - lastSessionsRead < SESSIONS_MIN_MS) return
   lastSessionsRead = now
   await refreshSessions($, registryPath)
+}
+
+// Contesto della principale a ogni giro; soglie di /config al più ogni SESSIONS_MIN_MS. Errori ignorati.
+async function refreshContext($: Ctx) {
+  const now = await $.clock.now()
+  const readLimits = lastLimitsRead === undefined || now - lastLimitsRead >= SESSIONS_MIN_MS
+  if (readLimits) lastLimitsRead = now
+  const [usage, rows] = await Promise.all([$.session.usage().catch(() => undefined), readLimits ? $.config.list().catch(() => undefined) : undefined])
+  await update($, contextAtom, (c) => ({
+    main: usage ? { tokens: usage.context.tokens, window: usage.context.window, percent: usage.context.percent } : c.main,
+    limits: rows ? (limitsFrom(rows) ?? null) : c.limits,
+    at: now,
+  }))
 }
 
 async function refreshAgents($: Ctx) {
@@ -172,6 +189,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     stopTimer()
     lastSessionsRead = undefined
+    lastLimitsRead = undefined
     await $.command.register({
       name: 'agenti',
       description: 'Pannello live degli agenti: stato e consumi',
@@ -195,6 +213,23 @@ export const register: Register = (on, options) => {
     }
     return r
   }).catch(($, e, next) => next(e))
+
+  // Streaming: i pezzi passano intatti e il risultato è quello di next(e); lo stato si aggiorna dopo, senza poterlo cambiare.
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    try {
+      const u = r.usage
+      if (u) {
+        const now = await $.clock.now()
+        await update($, usageAtom, (m) => setContext(m, e.agentId || MAIN, contextTokens(u), u.model, now))
+      }
+    } catch {
+      // un errore di contabilità non tocca la risposta
+    }
+    return r
+  }).catch(async function* ($, e, next) {
+    return yield* next(e)
+  })
 
   on('agent.spawn', async ($, e, next) => {
     const r = await next(e)

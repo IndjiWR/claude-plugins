@@ -12,9 +12,10 @@ export type Zone = 0 | 1 | 2 | 3
 export type CtxValue = { percent?: number; tokens?: number; zone?: Zone }
 export type MainContext = { tokens?: number; window: number; percent?: number }
 export type SessionContext = { tokens?: number; window?: number; percent?: number; zone: Zone | null; at: number }
+export type ContextSnapshot = { main?: MainContext; limits: Limits | null; at: number }
 
 declare module 'claude-code' {
   interface PluginState {
-    'agent-monitor': { usage: Shaped<UsageMap>; alerted: Shaped<AlertedMap>; agents: Shaped<AgentSnapshot>; selected: Shaped<string>; sessions: Shaped<SessionsSnapshot> }
+    'agent-monitor': { usage: Shaped<UsageMap>; alerted: Shaped<AlertedMap>; agents: Shaped<AgentSnapshot>; selected: Shaped<string>; sessions: Shaped<SessionsSnapshot>; context: Shaped<ContextSnapshot> }
   }
 }
