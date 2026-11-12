@@ -1,6 +1,6 @@
 # agent-monitor
 
-Mod per Claude Code: un pannello live accanto alla chat con gli agenti della sessione. Per ognuno mostra stato, nome, modello, token, durata e turni, e avvisa quando un agente consuma troppo.
+Mod per Claude Code: un pannello live accanto alla chat con gli agenti della sessione e le sessioni di progetto in background. Per ognuno mostra stato, nome, modello, token, durata e turni, e avvisa quando un agente consuma troppo.
 
 ## Cosa mostra
 
@@ -13,14 +13,14 @@ Mod per Claude Code: un pannello live accanto alla chat con gli agenti della ses
 
 ## Sessioni di progetto
 
-In cima al pannello la sezione **SESSIONI DI PROGETTO** elenca le sessioni in background.
+Sotto il riepilogo e sopra la tabella degli agenti la sezione **SESSIONI DI PROGETTO** elenca le sessioni in background.
 
 - **Fonti**: `claude agents --json` (sessioni vive) e il registro della coordinatrice `sessioni.json` (opzione `sessionsRegistry`; vuota = nessun registro). Si vedono le sessioni vive e quelle chiuse nelle ultime 24 ore.
 - **Stati**: `blocc` (in attesa di te, con il motivo), `lav`, `ferma`, `chiusa`; per le chiuse c'è l'esito.
 - **Lettura**: in parallelo agli agenti e al più ogni 10 s, per non lanciare `claude` a ogni aggiornamento.
 - **Dettaglio** della sessione scelta: `id · cwd`, motivo del blocco, esito.
 - **Copia attach**: copia `claude attach <id>` negli appunti. Gli id sono validati come esadecimali.
-- **Apri nel Terminale**: solo nella superficie terminale; apre una scheda di Terminal.app con `osascript`. Se fallisce, avviso e copia dell'attach.
+- **Apri nel Terminale**: solo nella superficie terminale; apre una nuova finestra di Terminal.app con `osascript`. Se fallisce, avviso e copia dell'attach.
 - Il testo di `/agenti` (fallback) elenca prima le sessioni.
 - I subagent sono etichettati per descrizione (poi nome, poi id); l'id è nella riga di dettaglio.
 
@@ -51,7 +51,7 @@ Quando un agente supera la soglia `alertTokens` (token di input + output), compa
 
 ## Limiti
 
-- Mostra solo gli agenti di questa sessione e le sue teammate.
+- Mostra solo gli agenti di questa sessione e le sue teammate, più le sessioni di progetto lette da `claude agents --json` e dal registro.
 - L'uso dei token sopravvive ai reload della mod, perché è salvato nello stato di sessione.
 - Il pulsante **Ferma** passa da `TaskStop`. Il comportamento dal vivo di `TaskStop` lanciato da una mod va ancora provato.
 

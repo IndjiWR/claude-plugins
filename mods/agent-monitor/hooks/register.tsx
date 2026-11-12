@@ -329,7 +329,7 @@ export const register: Register = (on, options) => {
     }
 
     // Copia il comando attach (anche come ripiego): l'id viene validato prima di comporlo.
-    const copyAttach = async (id: string) => {
+    const copyAttach = async (id: string, quiet = false) => {
       if (!isAttachId(id)) {
         $.ui.toast(`Id non valido: ${id}`)
         return false
@@ -337,10 +337,10 @@ export const register: Register = (on, options) => {
       const text = attachCommand(id)
       try {
         const r = await $.ui.copy({ text, surface: e.surface })
-        $.ui.toast(r.isCopied ? `Copiato: ${text}` : `Copia non riuscita (${r.reason})`)
+        if (!quiet) $.ui.toast(r.isCopied ? `Copiato: ${text}` : `Copia non riuscita (${r.reason})`)
         return r.isCopied
       } catch (err) {
-        $.ui.toast(`Copia non riuscita (${err instanceof Error ? err.message : String(err)})`)
+        if (!quiet) $.ui.toast(`Copia non riuscita (${err instanceof Error ? err.message : String(err)})`)
         return false
       }
     }
@@ -353,20 +353,16 @@ export const register: Register = (on, options) => {
         const r = await $.process.run(['osascript', '-e', `tell application "Terminal" to do script "${attachCommand(id)}"`, '-e', 'tell application "Terminal" to activate'])
         if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}`)
       } catch {
-        try {
-          await $.ui.copy({ text: attachCommand(id), surface: e.surface })
-        } catch {
-          // il toast sotto basta
-        }
-        $.ui.toast('Terminale non aperto: comando copiato')
+        const copied = await copyAttach(id, true)
+        $.ui.toast(copied ? 'Terminale non aperto: comando copiato' : 'Terminale non aperto: copia non riuscita')
       }
     }
 
-    const sessionsBlock = sessSnap.list.length > 0 && (
+    const sessionsBlock = (sessSnap.list.length > 0 || sessSnap.stale) && (
       <Box key="sessions" flexDirection="column">
-        <Box key="sess-head"><Text dimColor bold>
+        {sessSnap.list.length > 0 && <Box key="sess-head"><Text dimColor bold>
           SESSIONI DI PROGETTO
-        </Text></Box>
+        </Text></Box>}
         {sessSnap.list.map((s) => {
           const picked = selSession?.id === s.id
           const v = SESSION_VIEW[s.state]

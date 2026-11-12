@@ -545,6 +545,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
+  test(`sessioni (${surface}): prima lettura fallita, lista vuota: riga "sessioni non aggiornate" senza intestazione`, async ($, on) => {
+    world(on, { failAgentsCmd: true, registry: '{}' })
+    const ui = await openPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /sessioni non aggiornate/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /SESSIONI DI PROGETTO/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
   test(`sessioni (${surface}): Copia attach e toast, anche in caso di errore`, async ($, on) => {
     const st = world(on, { agentsJson: SLIVE, registry: SREG })
     const ui = await openPane($, surface)
@@ -593,6 +601,16 @@ test('sessioni: osascript che rifiuta, toast e copia del comando', async ($, on)
   await ui.press({ key: 'attach-open-e003551f' })
   expect(st.toasts).toContain('Terminale non aperto: comando copiato')
   expect(st.copies).toEqual([{ text: 'claude attach e003551f', surface: 'terminal' }])
+  await ui.unmount()
+})
+
+test('sessioni: osascript e copia falliscono, un solo toast di errore', async ($, on) => {
+  const st = world(on, { agentsJson: SLIVE, registry: SREG, failOsascript: true, copy: { isCopied: false, reason: 'no-clipboard' } })
+  const ui = await openPane($, 'terminal')
+  await ui.press({ key: 'sess-sel-e003551f' })
+  await ui.press({ key: 'attach-open-e003551f' })
+  expect(st.toasts).toContain('Terminale non aperto: copia non riuscita')
+  expect(st.toasts.filter((t) => /Copia non riuscita|Copiato|comando copiato/.test(t))).toEqual([])
   await ui.unmount()
 })
 
