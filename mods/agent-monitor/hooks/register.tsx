@@ -1,29 +1,69 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { Register, StateDollar, Timer } from 'claude-code'
 
-import type { AlertedMap, TokenCounts, UsageMap } from '../types'
-import { addTurn, buildTree, formatDuration, formatTokens, overThreshold, setModel, totals } from './ledger'
-import type { Row } from './ledger'
+import type { AgentSnapshot, AlertedMap, TokenCounts, UsageMap } from '../types'
+import { ACTIVE_STATUSES, MAIN, addTurn, agentLabel, buildTree, formatDuration, formatTokens, overThreshold, setModel, totals } from './ledger'
+import type { AgentLike, Row } from './ledger'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
 const usageAtom = atom({ plugin: 'agent-monitor', key: 'usage' } as const, {} as UsageMap, { shape: 'usage-1' })
 const alertedAtom = atom({ plugin: 'agent-monitor', key: 'alerted' } as const, {} as AlertedMap, { shape: 'alerted-1' })
+const agentsAtom = atom({ plugin: 'agent-monitor', key: 'agents' } as const, { list: [], stale: false, at: 0 } as AgentSnapshot, { shape: 'agents-1' })
+const PANE = 'agenti'
 
 const counts = (t: TokenCounts) =>
   `in ${formatTokens(t.input)} / out ${formatTokens(t.output)} / cache ${formatTokens(t.cacheRead)}+${formatTokens(t.cacheWrite)}`
 
+const rowLine = (r: Row) =>
+  `${'  '.repeat(r.depth)}${r.status} ${r.label} · ${r.model ?? '—'} · ${counts(r.tokens)} · ${formatDuration(r.durationMs)} · ${r.turns} turni`
+const totalLine = (tot: TokenCounts & { turns: number }) => `Totale: ${counts(tot)} · ${tot.turns} turni`
+
 export function textSummary(rows: Row[], tot: TokenCounts & { turns: number }): string {
-  const lines = rows.map(
-    (r) =>
-      `${'  '.repeat(r.depth)}${r.status} ${r.label} · ${r.model ?? '—'} · ${counts(r.tokens)} · ${formatDuration(r.durationMs)} · ${r.turns} turni`,
-  )
-  lines.push(`Totale: ${counts(tot)} · ${tot.turns} turni`)
+  const lines = rows.map(rowLine)
+  lines.push(totalLine(tot))
   return lines.join('\n')
 }
 
-export const register: Register = (on, options) => {
-  const limit = Number((options as Record<string, unknown> | undefined)?.alertTokens ?? 200000)
+type Ctx = StateDollar & {
+  agent: { list: () => Promise<readonly AgentLike[]> }
+  clock: { now: () => Promise<number>; every: (ms: number, fn: () => void) => Timer }
+}
+let timer: Timer | undefined
+let lastRender = 0
 
+// Rilegge l'elenco; se rifiuta tiene l'ultimo e segna "non aggiornato".
+async function refresh($: Ctx) {
+  try {
+    const list = await $.agent.list()
+    const at = await $.clock.now()
+    await update($, agentsAtom, () => ({
+      list: list.map((a) => ({ id: a.id, parentId: a.parentId, status: a.status, name: a.name, description: a.description, type: a.type })),
+      stale: false,
+      at,
+    }))
+  } catch {
+    await update($, agentsAtom, (s) => ({ ...s, stale: true, at: s.at || -1 }))
+  }
+}
+
+function stopTimer() {
+  timer?.cancel()
+  timer = undefined
+}
+
+function startTimer($: Ctx, refreshMs: number) {
+  if (timer) return
+  timer = $.clock.every(refreshMs, async () => {
+    await refresh($)
+    // Rete di sicurezza: se il pannello non viene più disegnato per 3 intervalli il timer si ferma.
+    if ((await $.clock.now()) - lastRender > refreshMs * 3) stopTimer()
+  })
+}
+
+export const register: Register = (on, options) => {
+  const opts = options as Record<string, unknown> | undefined
+  const limit = Number(opts?.alertTokens ?? 200000)
+  const refreshMs = Math.max(500, Number(opts?.refreshMs ?? 2000) || 2000)
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'agenti',
@@ -42,8 +82,7 @@ export const register: Register = (on, options) => {
     if (over.length > 0) {
       const list = await $.agent.list()
       for (const id of over) {
-        const a = list.find((x) => x.id === id)
-        $.ui.toast(`Agente ${a?.name ?? a?.description ?? id} oltre ${formatTokens(limit)} token`)
+        $.ui.toast(`Agente ${agentLabel(id, list)} oltre ${formatTokens(limit)} token`)
       }
       await update($, alertedAtom, (m) => ({ ...m, ...Object.fromEntries(over.map((id) => [id, true as const])) }))
     }
@@ -66,9 +105,70 @@ export const register: Register = (on, options) => {
       await $.ui.view({})
       return {}
     }
+    const opened = await $.ui.open({ id: PANE, title: 'Agenti', focus: true })
+    if (opened.isPlaced) {
+      lastRender = await $.clock.now()
+      await refresh($)
+      startTimer($, refreshMs)
+      return {}
+    }
     const now = await $.clock.now()
     const usage = await read($, usageAtom)
     const agents = await $.agent.list()
-    return { text: textSummary(buildTree(agents, usage, now), totals(usage)) }
+    return { text: `Il pannello non si apre qui (${opened.reason}).\n` + textSummary(buildTree(agents, usage, now), totals(usage)) }
+  }).catch(($, e, next) => next(e))
+
+  on('ui.close', async ($, e, next) => {
+    const r = await next(e)
+    if (e.id === PANE) stopTimer()
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const now = await $.clock.now()
+    lastRender = now
+    if ((await read($, agentsAtom)).at === 0) await refresh($)
+    startTimer($, refreshMs)
+    const snap = await read($, agentsAtom)
+    const usage = await read($, usageAtom)
+    const rows = buildTree(snap.list, usage, now)
+    const status = new Map(snap.list.map((a) => [a.id, a.status]))
+    return (
+      <Box flexDirection="column">
+        {rows.map((r) => (
+          <Box key={`row-${r.id}`} flexDirection="row">
+            <Text>{rowLine(r)}</Text>
+            {r.id !== MAIN && (
+              <Button
+                key={`transcript-${r.id}`}
+                label="Transcript"
+                onPress={() => {
+                  void $.ui.view({ agentId: r.id })
+                }}
+              />
+            )}
+            {r.id !== MAIN && ACTIVE_STATUSES.has(status.get(r.id) ?? r.status) && (
+              <Button
+                key={`stop-${r.id}`}
+                label="Ferma"
+                onPress={async () => {
+                  try {
+                    const answer = await $.ui.ask(`Fermo l'agente ${r.label}?`, ['Ferma', 'Annulla'])
+                    if (answer !== 'Ferma') return
+                    await $.tool.call({ tool: 'TaskStop', task_id: r.id })
+                    $.ui.toast(`Agente ${r.label} fermato`)
+                  } catch (err) {
+                    $.ui.toast(`Impossibile fermare ${r.label}: ${err instanceof Error ? err.message : String(err)}`)
+                  }
+                }}
+              />
+            )}
+          </Box>
+        ))}
+        <Text>{totalLine(totals(usage))}</Text>
+        {snap.stale && <Text dimColor>elenco non aggiornato</Text>}
+      </Box>
+    )
   }).catch(($, e, next) => next(e))
 }

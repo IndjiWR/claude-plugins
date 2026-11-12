@@ -27,6 +27,7 @@ const world = (on: On, agents: unknown[] = []) => {
     st.registered.push(e)
     return { value: undefined } as never
   })
+  on('ui.open', () => ({ value: { isPlaced: false, reason: 'test' } }) as never)
   on('agent.spawn', () => ({ model: 'm', agentId: st.spawnId }) as never)
   return st
 }
@@ -77,6 +78,16 @@ test('/agenti risponde con albero e totale', async ($, on) => {
   expect(text).toContain('Sessione principale')
   expect(text).toContain('  running Cerca file · sonnet · in 1,5k / out 500 / cache 0+0')
   expect(text).toContain('Totale:')
+})
+
+test('toast usa l etichetta delle righe: nome, altrimenti descrizione troncata', async ($, on) => {
+  const st = world(on, [{ id: 'a1', status: 'running', description: 'D'.repeat(50), type: 't' }, { id: 'a2', status: 'running', name: 'Nome', description: 'x', type: 't' }])
+  await $.turn.complete(turn('a1', 250000))
+  await $.turn.complete(turn('a2', 250000))
+  expect(st.toasts).toEqual([
+    `Agente ${'D'.repeat(40)} oltre 200,0k token`,
+    'Agente Nome oltre 200,0k token',
+  ])
 })
 
 test('/agenti chat apre la vista', async ($, on) => {

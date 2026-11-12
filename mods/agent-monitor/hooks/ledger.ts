@@ -19,8 +19,8 @@ export type TurnUsageLike = {
   cache_creation_input_tokens?: number
 }
 
-const MAIN = 'main'
-const MAIN_LABEL = 'Sessione principale'
+export const MAIN = 'main'
+export const MAIN_LABEL = 'Sessione principale'
 const ACTIVE = new Set(['pending', 'running', 'waiting', 'idle'])
 
 const n = (v: number | undefined) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
@@ -48,6 +48,14 @@ export function setModel(usage: UsageMap, agentId: string, model: string, now: n
 }
 
 const truncate = (s: string) => (s.length > 40 ? s.slice(0, 40) : s)
+export const ACTIVE_STATUSES = ACTIVE
+
+/** Etichetta unica per pannello e avvisi: nome, altrimenti descrizione, altrimenti id; "main" è la sessione principale. */
+export function agentLabel(id: string, agents: readonly AgentLike[]): string {
+  if (id === MAIN) return MAIN_LABEL
+  const a = agents.find((x) => x.id === id)
+  return truncate(a ? (a.name ?? a.description) : id)
+}
 
 export function buildTree(agents: readonly AgentLike[], usage: UsageMap, now: number): Row[] {
   const list = agents.filter((a) => a.id !== MAIN)
