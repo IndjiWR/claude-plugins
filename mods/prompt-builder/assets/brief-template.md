@@ -1,6 +1,6 @@
 # Brief: <titolo>
 ## Obiettivo            cosa e perché, 2-4 righe
-## Fatto quando         criteri verificabili
+## Fatto quando         elenco di criteri, ciascuno verificabile con un comando o un'osservazione
 ## Taglia e metodo      piccolo | delimitato | progetto → flusso da seguire
 ## Vincoli              dell'utente parola per parola + pertinenti della linea guida
 ## Contesto             percorsi e documenti (riferimenti, non contenuti)

@@ -11,11 +11,12 @@ Mod per Claude Code: prima che un prompt lungo arrivi alla sessione, lo trasform
 
 ## Flusso
 
-1. Il modello analizza il prompt e individua le lacune.
-2. Intervista: al massimo 5 domande, solo sulle lacune reali.
-3. Proposte: fino a 8 aggiunte, approvabili in una domanda a scelta multipla.
-4. Il brief viene composto (obiettivo, Fatto quando, taglia e metodo, vincoli, contesto, verifica, fuori ambito) e inviato alla sessione.
-5. L'originale resta salvato in `.claude/prompt-builder/last.md`.
+1. Conferma: "Ottimizzo il prompt?" con Sì / No, invia così. Con No il prompt passa invariato.
+2. Il modello analizza il prompt e individua le lacune.
+3. Intervista: al massimo 5 domande, solo sulle lacune reali.
+4. Proposte: fino a 8 aggiunte, approvabili in una domanda a scelta multipla.
+5. Il brief viene composto (obiettivo, Fatto quando, taglia e metodo, vincoli, contesto, strumenti, piano subagent, verifica, fuori ambito) e inviato alla sessione.
+6. L'originale resta salvato in `.claude/prompt-builder/last.md`.
 
 Se un passaggio fallisce (timeout, risposta non valida), il prompt originale viene inviato comunque, con una nota che rimanda alla skill di ripiego.
 

@@ -19,7 +19,7 @@
 - Letture mirate dei file; output dei comandi filtrati.
 
 ## Git
-- Nessun trailer `Co-Authored-By` e nessuna firma "Generated with Claude Code".
+- Nessun trailer `Co-Authored-By` e nessuna firma "Generated with Claude Code" (preferenza dell'utente).
 
 ## Lingua
 - Rispondi in italiano, in modo conciso.
