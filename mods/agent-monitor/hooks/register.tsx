@@ -1,21 +1,25 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
-import type { AgentSnapshot, AlertedMap, ProjectSession, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
-import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
+import type { AgentSnapshot, AlertedMap, ContextSnapshot, CtxValue, ProjectSession, SessionContext, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
+import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setContext, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
 import type { AgentLike, Row } from './ledger'
+import { agentValue, contextFilePath, contextTokens, ctxCell, ctxText, limitsFrom, mainValue, parseContextFile, zoneOf } from './context'
 import { attachCommand, isAttachId, mergeSessions, parseAgents, parseRegistry } from './sessions'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
-const usageAtom = atom({ plugin: 'agent-monitor', key: 'usage' } as const, {} as UsageMap, { shape: 'usage-1' })
+export const usageAtom = atom({ plugin: 'agent-monitor', key: 'usage' } as const, {} as UsageMap, { shape: 'usage-1' })
 const alertedAtom = atom({ plugin: 'agent-monitor', key: 'alerted' } as const, {} as AlertedMap, { shape: 'alerted-1' })
 const agentsAtom = atom({ plugin: 'agent-monitor', key: 'agents' } as const, { list: [], stale: false, at: 0 } as AgentSnapshot, { shape: 'agents-1' })
 const sessionsAtom = atom({ plugin: 'agent-monitor', key: 'sessions' } as const, { list: [], stale: false, at: 0 } as SessionsSnapshot, { shape: 'sessions-1' })
+const contextAtom = atom({ plugin: 'agent-monitor', key: 'context' } as const, { limits: null, at: 0 } as ContextSnapshot, { shape: 'context-1' })
 const DEFAULT_REGISTRY = '/Users/indji/Documents/Lavoro/Claude/Projects/Indji/coordinatrice/sessioni.json'
 const selectedAtom = atom({ plugin: 'agent-monitor', key: 'selected' } as const, '', { shape: 'selected-1' })
 const PANE = 'agenti'
 
 const LEVEL_COLOR = { ok: 'success', warn: 'warning', over: 'error' } as const
+// Zona 0 col colore del testo normale; 3 è rosso in grassetto (vedi bold della colonna)
+const CTX_COLOR: readonly (string | undefined)[] = [undefined, LEVEL_COLOR.warn, LEVEL_COLOR.over, LEVEL_COLOR.over]
 const STATUS_VIEW: Record<string, { glyph: string; label: string; color: string }> = {
   running: { glyph: '●', label: 'run', color: 'success' },
   idle: { glyph: '●', label: 'idle', color: 'success' },
@@ -55,10 +59,10 @@ function treePrefix(rows: Row[], i: number): string {
 const trunc = (s: string, w: number) => (s.length > w ? s.slice(0, Math.max(0, w - 1)) + '…' : s)
 
 // Riga di una sessione: glifo + stato, nome, progetto, esito troncato alla larghezza residua (sotto 50 colonne solo glifo e nome).
-function sessionLine(s: ProjectSession, cols: number): string {
+function sessionLine(s: ProjectSession, cols: number, ctx = ''): string {
   const v = SESSION_VIEW[s.state]
   if (cols < 50) return `${v.glyph} ${s.name}`
-  const head = `${v.glyph} ${v.label.padEnd(5)} ${s.name} · ${s.project}`
+  const head = `${v.glyph} ${v.label.padEnd(5)} ${s.name} · ${s.project}${ctx ? ` · ${ctx}` : ''}`
   const room = cols - 2 - head.length - 3
   return s.esito && room >= 4 ? `${head} · ${trunc(s.esito, room)}` : head
 }
@@ -66,34 +70,44 @@ function sessionLine(s: ProjectSession, cols: number): string {
 const counts = (t: TokenCounts) =>
   `in ${formatTokens(t.input)} / out ${formatTokens(t.output)} / cache ${formatTokens(t.cacheRead)}+${formatTokens(t.cacheWrite)}`
 
-const rowLine = (r: Row) =>
-  `${'  '.repeat(r.depth)}${r.status} ${r.label} · ${r.model ?? '—'} · ${counts(r.tokens)} · ${formatDuration(r.durationMs)} · ${r.turns} turni`
+const rowLine = (r: Row, v: CtxValue = {}) =>
+  `${'  '.repeat(r.depth)}${r.status} ${r.label} · ${r.model ?? '—'} · ${counts(r.tokens)} · ${formatDuration(r.durationMs)} · ${r.turns} turni${ctxText(v) ? ` · ${ctxText(v)}` : ''}`
 const totalLine = (tot: TokenCounts & { turns: number }) => `Totale: ${counts(tot)} · ${tot.turns} turni`
 
-const sessionText = (list: readonly ProjectSession[]) => list.map((s) => sessionLine(s, 120)).join('\n')
+const sessionText = (list: readonly ProjectSession[]) => list.map((s) => sessionLine(s, 120, s.context ? ctxText(s.context) : '')).join('\n')
 
-export function textSummary(rows: Row[], tot: TokenCounts & { turns: number }): string {
-  const lines = rows.map(rowLine)
+export function textSummary(rows: Row[], tot: TokenCounts & { turns: number }, ctxOf?: (id: string) => CtxValue): string {
+  const lines = rows.map((r) => rowLine(r, ctxOf?.(r.id)))
   lines.push(totalLine(tot))
   return lines.join('\n')
+}
+
+// Contesto di una riga: la principale dalla finestra del motore, i subagent in rapporto alla finestra della principale.
+function ctxValueOf(id: string, usage: UsageMap, c: ContextSnapshot): CtxValue {
+  const limits = c.limits ?? undefined
+  if (id === MAIN) return mainValue(c.main, limits)
+  return agentValue(usage[id], c.main?.window, usage[MAIN]?.ctxModel, limits)
 }
 
 type Ctx = StateDollar & {
   agent: { list: () => Promise<readonly AgentLike[]> }
   process: { run: (argv: string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number; stdout: string; stderr: string }> }
-  fs: { read: (path: string) => Promise<string> }
-  session: { id: () => Promise<string> }
+  fs: { read: (path: string) => Promise<string>; write: (path: string, text: string) => Promise<void> }
+  env: { get: (name: string) => Promise<string | undefined> }
+  session: { id: () => Promise<string>; usage: () => Promise<{ context: { tokens?: number; window: number; percent?: number } }> }
+  config: { list: () => Promise<readonly { key: string; value: unknown }[]> }
   clock: { now: () => Promise<number>; every: (ms: number, fn: () => void) => Timer }
 }
 let timer: Timer | undefined
 let lastRender = 0
 let lastSessionsRead: number | undefined
+let lastLimitsRead: number | undefined
 const SESSIONS_MIN_MS = 10_000
 
 // Rilegge l'elenco; se rifiuta tiene l'ultimo e segna "non aggiornato".
 async function refresh($: Ctx, registryPath: string) {
   // in parallelo; le sessioni non fanno mai fallire il refresh degli agenti
-  await Promise.all([refreshAgents($), maybeRefreshSessions($, registryPath).catch(() => {})])
+  await Promise.all([refreshAgents($), maybeRefreshSessions($, registryPath).catch(() => {}), refreshContext($).catch(() => {})])
 }
 
 // Le sessioni si rileggono al più ogni SESSIONS_MIN_MS (il primo giro subito).
@@ -102,6 +116,35 @@ async function maybeRefreshSessions($: Ctx, registryPath: string) {
   if (lastSessionsRead !== undefined && now - lastSessionsRead < SESSIONS_MIN_MS) return
   lastSessionsRead = now
   await refreshSessions($, registryPath)
+}
+
+// Contesto della principale a ogni giro; soglie di /config al più ogni SESSIONS_MIN_MS. Errori ignorati.
+async function refreshContext($: Ctx) {
+  const now = await $.clock.now()
+  const readLimits = lastLimitsRead === undefined || now - lastLimitsRead >= SESSIONS_MIN_MS
+  if (readLimits) lastLimitsRead = now
+  const [usage, rows] = await Promise.all([$.session.usage().catch(() => undefined), readLimits ? $.config.list().catch(() => undefined) : undefined])
+  await update($, contextAtom, (c) => ({
+    main: usage ? { tokens: usage.context.tokens, window: usage.context.window, percent: usage.context.percent } : c.main,
+    limits: rows ? (limitsFrom(rows) ?? null) : c.limits,
+    at: now,
+  }))
+}
+
+// Scrive il contesto della sessione per le altre sessioni; fs.write crea le cartelle. Errori ignorati.
+async function publishContext($: Ctx) {
+  try {
+    const [home, jobDir] = await Promise.all([$.env.get('HOME'), $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)])
+    const id = jobDir?.split('/').filter(Boolean).pop() || (await $.session.id())
+    if (!home || !id) return
+    const [usage, rows, at] = await Promise.all([$.session.usage(), $.config.list().catch(() => []), $.clock.now()])
+    const limits = limitsFrom(rows)
+    const { tokens, window, percent } = usage.context
+    const ctx: SessionContext = { tokens, window, percent, zone: limits && percent !== undefined ? zoneOf(percent, limits) : null, at }
+    await $.fs.write(contextFilePath(home, id), JSON.stringify(ctx))
+  } catch {
+    // la pubblicazione non tocca la risposta del turno
+  }
 }
 
 async function refreshAgents($: Ctx) {
@@ -143,7 +186,24 @@ async function refreshSessions($: Ctx, registryPath: string): Promise<void> {
   }
   const registry = await regP
   const self = await $.session.id().catch(() => undefined)
-  await update($, sessionsAtom, () => ({ list: mergeSessions(live, registry, at, self), stale: false, at }))
+  const merged = mergeSessions(live, registry, at, self)
+  const list = await withContext($, merged)
+  await update($, sessionsAtom, () => ({ list, stale: false, at }))
+}
+
+// Contesto pubblicato da ogni sessione viva; letture in parallelo, errori ignorati.
+async function withContext($: Ctx, list: ProjectSession[]): Promise<ProjectSession[]> {
+  const home = await $.env.get('HOME').catch(() => undefined)
+  if (!home) return list
+  return Promise.all(list.map(async (s) => {
+    const c = await $.fs.read(contextFilePath(home, s.id)).then(parseContextFile, () => undefined).catch(() => undefined)
+    if (!c || (c.percent === undefined && c.tokens === undefined)) return s
+    const context: CtxValue = {}
+    if (c.percent !== undefined) context.percent = c.percent
+    if (c.tokens !== undefined) context.tokens = c.tokens
+    if (c.zone !== null) context.zone = c.zone
+    return { ...s, context }
+  }))
 }
 
 function stopTimer() {
@@ -172,6 +232,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     stopTimer()
     lastSessionsRead = undefined
+    lastLimitsRead = undefined
     await $.command.register({
       name: 'agenti',
       description: 'Pannello live degli agenti: stato e consumi',
@@ -193,8 +254,28 @@ export const register: Register = (on, options) => {
       const list = await $.agent.list().catch(() => [] as readonly AgentLike[])
       for (const id of fresh) $.ui.toast(`Agente ${agentLabel(id, list)} oltre ${formatTokens(limit)} token`)
     }
+    if (e.agentId === undefined) void publishContext($)
     return r
   }).catch(($, e, next) => next(e))
+
+  // Streaming: i pezzi passano intatti e il risultato è quello di next(e); lo stato si aggiorna dopo, senza poterlo cambiare.
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    void (async () => {
+      try {
+        const u = r.usage
+        if (u) {
+          const now = await $.clock.now()
+          await update($, usageAtom, (m) => setContext(m, e.agentId || MAIN, contextTokens(u), u.model, now))
+        }
+      } catch {
+        // un errore di contabilità non tocca la risposta
+      }
+    })()
+    return r
+  }).catch(async function* ($, e, next) {
+    return yield* next(e)
+  })
 
   on('agent.spawn', async ($, e, next) => {
     const r = await next(e)
@@ -221,8 +302,11 @@ export const register: Register = (on, options) => {
     }
     const now = await $.clock.now()
     await refreshSessions($, registryPath).catch(() => {})
+    await refreshContext($).catch(() => {})
     const sessions = (await read($, sessionsAtom)).list
     const usage = await read($, usageAtom)
+    const ctx = await read($, contextAtom)
+    const ctxOf = (id: string) => ctxValueOf(id, usage, ctx)
     let agents: readonly AgentLike[]
     let stale = false
     try {
@@ -235,7 +319,7 @@ export const register: Register = (on, options) => {
       text:
         `Il pannello non si apre qui (${opened.reason}).\n` +
         (sessions.length > 0 ? sessionText(sessions) + '\n' : '') +
-        textSummary(buildTree(agents, usage, now), totals(usage)) +
+        textSummary(buildTree(agents, usage, now), totals(usage), ctxOf) +
         (stale ? '\nelenco non aggiornato' : ''),
     }
   }).catch(($, e, next) => next(e))
@@ -255,6 +339,8 @@ export const register: Register = (on, options) => {
     const snap = await read($, agentsAtom)
     const usage = await read($, usageAtom)
     const rows = buildTree(snap.list, usage, now)
+    const ctxSnap = await read($, contextAtom)
+    const ctxOf = (id: string) => ctxValueOf(id, usage, ctxSnap)
     const cols = e.props?.bodyColumns ?? 120
     const tot = totals(usage)
     const total = tot.input + tot.output
@@ -266,11 +352,11 @@ export const register: Register = (on, options) => {
     const selId = selSession ? '' : rows.some((r) => r.id === stored) ? stored : (rows.find((r) => r.id !== MAIN && ACTIVE.has(r.status))?.id ?? '')
     const sel = rows.find((r) => r.id === selId)
 
-    // Colonne: < 70 niente TURNI né barra; < 50 solo glifo, nome e token.
+    // Colonne: < 70 niente TURNI né barra; < 53 niente CTX; < 50 solo glifo, nome e token.
     const narrow = cols < 70
     const tiny = cols < 50
     // Una sola definizione di colonne per intestazione e righe: stessa larghezza, il gap è l'ultima cella di ogni colonna.
-    type Col = { id: string; header: string; w: number; keyed: boolean; text: (r: Row, i: number) => string; color?: (r: Row) => string | undefined }
+    type Col = { id: string; header: string; w: number; keyed: boolean; text: (r: Row, i: number) => string; color?: (r: Row) => string | undefined; bold?: (r: Row) => boolean }
     const tokenOf = (r: Row) => r.tokens.input + r.tokens.output
     const statusCol: Col = {
       id: 'status',
@@ -293,6 +379,17 @@ export const register: Register = (on, options) => {
       text: (r) => (narrow ? formatCompact(tokenOf(r)) : `${bar(tokenOf(r), limit, 6)} ${formatCompact(tokenOf(r))}`),
       color: (r) => (r.id === MAIN ? undefined : LEVEL_COLOR[usageLevel(tokenOf(r), limit)]),
     })
+    if (cols >= 53) {
+      tail.push({
+        id: 'ctx',
+        header: 'CTX',
+        w: 8,
+        keyed: true,
+        text: (r) => ctxCell(ctxOf(r.id)),
+        color: (r) => CTX_COLOR[ctxOf(r.id).zone ?? 0],
+        bold: (r) => ctxOf(r.id).zone === 3,
+      })
+    }
     if (!tiny) tail.push({ id: 'dur', header: 'DUR', w: 9, keyed: true, text: (r) => formatDuration(r.durationMs) })
     if (!narrow) tail.push({ id: 'turns', header: 'TURNI', w: 6, keyed: true, text: (r) => String(r.turns) })
     const labelW = Math.max(9, cols - 2 - statusCol.w - tail.reduce((n, c) => n + c.w, 0))
@@ -378,7 +475,7 @@ export const register: Register = (on, options) => {
               />
               <Text> </Text>
               <Text color={v.color} dimColor={s.state === 'closed' || undefined} bold={picked || undefined} inverse={picked || undefined}>
-                {sessionLine(s, cols)}
+                {sessionLine(s, cols, s.context && ctxText(s.context) ? `ctx ${ctxCell(s.context)}` : '')}
               </Text>
             </Box>
           )
@@ -448,7 +545,7 @@ export const register: Register = (on, options) => {
               <Text> </Text>
               {columns.map((c) => {
                 const t = (
-                  <Text key={c.id} color={c.color?.(r)} {...style}>
+                  <Text key={c.id} color={c.color?.(r)} {...style} bold={style.bold || c.bold?.(r) || undefined}>
                     {cell(c.text(r, i), c.w)}
                   </Text>
                 )

@@ -55,6 +55,12 @@ export function seedAgent(usage: UsageMap, agentId: string, now: number, model?:
   return { ...usage, [agentId]: model ? { ...base, model } : base }
 }
 
+/** Contesto dell'ultima richiesta di un agente; crea la voce se manca, non tocca i cumulati. */
+export function setContext(usage: UsageMap, agentId: string, tokens: number, model: string, now: number): UsageMap {
+  const base = usage[agentId] ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, firstAt: now, lastAt: now }
+  return { ...usage, [agentId]: { ...base, ctxTokens: tokens, ctxModel: model, ctxAt: now } }
+}
+
 const truncate = (s: string) => (s.length > 40 ? s.slice(0, 40) + '…' : s)
 
 /** Etichetta unica per pannello e avvisi: descrizione, altrimenti nome, altrimenti id; "main" è la sessione principale. */

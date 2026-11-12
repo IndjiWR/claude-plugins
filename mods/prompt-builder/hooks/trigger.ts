@@ -36,6 +36,11 @@ export function stripRaw(text: string): string | undefined {
   return m ? text.slice(m[0].length) : undefined
 }
 
+// Sessioni `claude --bg`: CLAUDE_JOB_DIR non vuota.
+export function isBackground(jobDir: string | undefined): boolean {
+  return typeof jobDir === 'string' && jobDir !== ''
+}
+
 export function shouldTrigger(text: string, cfg: TriggerConfig): boolean {
   return text.length >= cfg.minChars && countSignals(text) >= cfg.minSignals && pastedRatio(text) <= 0.6
 }

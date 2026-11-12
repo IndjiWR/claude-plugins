@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { countSignals, pastedRatio, shouldTrigger, stripRaw } from '../hooks/trigger'
+import { countSignals, isBackground, pastedRatio, shouldTrigger, stripRaw } from '../hooks/trigger'
 
 const cfg = { minChars: 400, minSignals: 2 }
 const pad = (head: string, n: number) => head + ' ' + 'lorem ipsum dolor sit amet '.repeat(40).slice(0, Math.max(0, n - head.length - 1))
@@ -30,4 +30,10 @@ test('shouldTrigger', () => {
   const log = two + '\n' + '2026-11-12 ERROR boom something failed here\n'.repeat(46)
   expect(log.length).toBeGreaterThan(2000)
   expect(shouldTrigger(log, cfg)).toBe(false)
+})
+
+test('isBackground: vero solo con CLAUDE_JOB_DIR non vuota', () => {
+  expect(isBackground(undefined)).toBe(false)
+  expect(isBackground('')).toBe(false)
+  expect(isBackground('/Users/u/.claude/jobs/abc')).toBe(true)
 })

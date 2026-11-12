@@ -7,6 +7,7 @@ Mod per Claude Code: prima che un prompt lungo arrivi alla sessione, lo trasform
 - Intercetta solo i prompt che scrivi tu nel composer.
 - Scatta quando il prompt ha almeno **400 caratteri**, almeno **2 segnali** di lavoro strutturato (verbo d'azione, elenco, più requisiti, percorsi, parole di progetto) e al massimo il **60%** di codice o log incollato.
 - Non tocca i comandi slash né i prompt che iniziano con `!raw <testo>`: passano così come sono. Usa `!raw` quando vuoi inviare un testo lungo senza brief.
+- Non interviene nelle sessioni avviate in background (`claude --bg`): lì il prompt passa così com'è; `/prompt-builder <testo>` resta disponibile.
 - Sotto la soglia il prompt passa senza modifiche.
 
 ## Flusso

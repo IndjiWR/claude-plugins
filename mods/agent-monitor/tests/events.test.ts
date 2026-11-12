@@ -9,6 +9,13 @@ const summary = async ($: { command: { run: (i: never) => Promise<unknown> } }) 
 
 const world = (on: On, agents: unknown[] = []) => {
   mock.store(on)
+  sets = []
+  failSet = false
+  on('state.set', (_, e, next) => {
+    if (failSet) throw new Error('boom')
+    sets.push(e as never)
+    return next(e)
+  })
   on('turn.complete', (_, e) => ({ text: e.answer }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
   const st = { failList: false, t: 1000, step: 10, toasts: [] as string[], views: [] as unknown[], registered: [] as unknown[], spawnId: 'new1' }
@@ -136,4 +143,167 @@ test('/agenti testo: agent.list rifiuta -> ultimo elenco e nota', async ($, on) 
   const r = (await $.command.run({ command: 'agenti', args: '' } as never)) as { text: string }
   expect(r.text).toContain('Sessione principale')
   expect(r.text).toContain('elenco non aggiornato')
+})
+
+const stepUsage = (input: number, model: string, cr = 0, cc = 0) => ({ model, input_tokens: input, output_tokens: 1, cache_read_input_tokens: cr, cache_creation_input_tokens: cc })
+const stepRes = (usage: unknown) => ({ turnId: 't', index: 0, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage }) as never
+const stepIn = (agentId?: string) => ({ turnId: 't', index: 0, model: 'm', messageCount: 1, agentId }) as never
+
+// Stato letto passando dal comando /agenti non basta (il contesto non è ancora mostrato): si intercettano le scritture.
+const usageOf = async (_$: unknown) => lastUsage()
+let failSet = false
+let sets: Array<{ key: string; value: unknown }> = []
+const lastUsage = () => {
+  const w = [...sets].reverse().find((x) => x.key === 'usage')
+  const v = w?.value as { value?: unknown } | undefined
+  return (v && typeof v === 'object' && 'value' in v ? v.value : v) ?? {}
+}
+
+async function runStep($: { turn: { step: (i: never) => AsyncGenerator<unknown, unknown> } }, input: never) {
+  const it = $.turn.step(input)
+  for (;;) {
+    const r = await it.next()
+    if (r.done) return r.value
+  }
+}
+
+test('turn.step di un subagent salva il contesto dell ultima richiesta', async ($, on) => {
+  world(on)
+  let u: unknown = stepUsage(100, 'sonnet', 50, 20)
+  on('turn.step', async function* () {
+    return stepRes(u)
+  })
+  await runStep($ as never, stepIn('a1'))
+  u = stepUsage(300, 'haiku', 1000, 200)
+  await runStep($ as never, stepIn('a1'))
+  const usage = (await usageOf($)) as Record<string, { ctxTokens: number; ctxModel: string }>
+  expect(usage.a1.ctxTokens).toBe(1500)
+  expect(usage.a1.ctxModel).toBe('haiku')
+})
+
+test('turn.step con usage null: nessun aggiornamento e risultato invariato', async ($, on) => {
+  world(on)
+  const res = stepRes(null)
+  on('turn.step', async function* () {
+    return res
+  })
+  const r = await runStep($ as never, stepIn('a1'))
+  expect(r).toEqual(res)
+  const usage = (await usageOf($)) as Record<string, unknown>
+  expect(usage.a1).toBeUndefined()
+})
+
+test('turn.step: il risultato di next torna identico', async ($, on) => {
+  world(on)
+  const res = stepRes(stepUsage(5, 'sonnet'))
+  on('turn.step', async function* () {
+    return res
+  })
+  expect(await runStep($ as never, stepIn('a1'))).toEqual(res)
+})
+
+test('turn.step senza agentId: salva il modello sotto MAIN', async ($, on) => {
+  world(on)
+  on('turn.step', async function* () {
+    return stepRes(stepUsage(10, 'opus', 5))
+  })
+  await runStep($ as never, stepIn(undefined))
+  const usage = (await usageOf($)) as Record<string, { ctxModel: string; ctxTokens: number }>
+  expect(usage.main.ctxModel).toBe('opus')
+  expect(usage.main.ctxTokens).toBe(15)
+})
+
+// Task 3: pubblicazione del contesto della sessione principale
+const ctxWorld = (on: On, opts: { cfg?: boolean; failWrite?: boolean; jobDir?: string } = {}) => {
+  world(on)
+  const writes: { path: string; text: string }[] = []
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'CLAUDE_JOB_DIR' ? opts.jobDir : '/home/u' }) as never)
+  on('session.id', () => ({ value: 's1' }) as never)
+  on('session.usage', () => ({ value: { context: { tokens: 470, window: 1000, percent: 47 } } }) as never)
+  on('config.list', () =>
+    ({ value: opts.cfg === false ? [] : [{ key: 'auto-clear-context.threshold', value: 40 }, { key: 'auto-clear-context.hardThreshold', value: 60 }] }) as never)
+  on('fs.write', (_, e) => {
+    writes.push({ path: (e as { path: string }).path, text: (e as { text: string }).text })
+    if (opts.failWrite) throw new Error('disco pieno')
+    return { value: undefined } as never
+  })
+  return writes
+}
+const flush = () => new Promise((r) => setTimeout(r, 20))
+
+test('turn.complete della principale scrive il file di contesto', async ($, on) => {
+  const writes = ctxWorld(on)
+  await $.turn.complete(turn(undefined, 1))
+  await flush()
+  expect(writes.length).toBe(1)
+  expect(writes[0].path).toBe('/home/u/.claude/agent-monitor/contesto/s1.json')
+  const j = JSON.parse(writes[0].text)
+  expect(j).toMatchObject({ percent: 47, zone: 1, window: 1000, tokens: 470 })
+  expect(typeof j.at).toBe('number')
+})
+
+test('turn.complete con CLAUDE_JOB_DIR scrive nel file dell id del job', async ($, on) => {
+  const writes = ctxWorld(on, { jobDir: '/Users/u/.claude/jobs/741af455' })
+  await $.turn.complete(turn(undefined, 1))
+  await flush()
+  expect(writes[0].path).toBe('/home/u/.claude/agent-monitor/contesto/741af455.json')
+})
+
+test('turn.complete di un subagent non scrive', async ($, on) => {
+  const writes = ctxWorld(on)
+  await $.turn.complete(turn('a1', 1))
+  await flush()
+  expect(writes.length).toBe(0)
+})
+
+test('fs.write che rifiuta: turn.complete risponde comunque', async ($, on) => {
+  const writes = ctxWorld(on, { failWrite: true })
+  const r = (await $.turn.complete({ ...(turn(undefined, 1) as object), answer: 'ciao' } as never)) as { text: string }
+  await flush()
+  expect(writes.length).toBe(1)
+  expect(r.text).toBe('ciao')
+})
+
+test('turn.step: un errore di contabilità non tocca il risultato', async ($, on) => {
+  world(on)
+  failSet = true
+  const res = stepRes(stepUsage(5, 'sonnet'))
+  on('turn.step', async function* () {
+    return res
+  })
+  expect(await runStep($ as never, stepIn('a1'))).toEqual(res)
+  await flush()
+})
+
+test('senza auto-clear-context: zone null', async ($, on) => {
+  const writes = ctxWorld(on, { cfg: false })
+  await $.turn.complete(turn(undefined, 1))
+  await flush()
+  expect(JSON.parse(writes[0].text).zone).toBeNull()
+})
+
+// Task 5: contesto nel testo di fallback di /agenti
+test('/agenti testo: ctx sulla riga principale e sulla riga della sessione', async ($, on) => {
+  world(on)
+  on('session.usage', () => ({ value: { context: { tokens: 470, window: 1000, percent: 47 } } }) as never)
+  on('config.list', () =>
+    ({ value: [{ key: 'auto-clear-context.threshold', value: 40 }, { key: 'auto-clear-context.hardThreshold', value: 60 }] }) as never)
+  on('env.get', () => ({ value: '/h' }) as never)
+  on('process.run', () =>
+    ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ id: 's1', name: 'a', kind: 'background', cwd: '/p/a', state: 'working', sessionId: 'x-a' }]) } }) as never)
+  on('fs.read', (_, e) => {
+    if ((e as { path: string }).path.includes('/contesto/')) return { value: JSON.stringify({ tokens: 470, window: 1000, percent: 47, zone: 1, at: 5 }) } as never
+    throw new Error('ENOENT')
+  })
+  await $.turn.complete(turn(undefined, 7))
+  const lines = (await summary($)).split('\n')
+  expect(lines.find((l) => l.includes('Sessione principale'))).toContain('· ctx 47% (zona morbida)')
+  expect(lines.find((l) => l.includes('lav'))).toContain('ctx 47% (zona morbida)')
+})
+
+test('textSummary con ctxOf aggiunge ctx solo se non vuoto', () => {
+  const u = { a: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, turns: 5, firstAt: 0, lastAt: 0 } }
+  const rows = buildTree([], u, 0)
+  expect(textSummary(rows, totals(u), () => ({ percent: 30, zone: 0 }))).toContain('· ctx 30% (zona normale)')
+  expect(textSummary(rows, totals(u), () => ({}))).not.toContain('ctx')
 })

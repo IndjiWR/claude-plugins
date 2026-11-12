@@ -3,7 +3,7 @@ import { loadGuidelines } from './guideline'
 import type { FileIO } from './guideline'
 import { runPipeline } from './pipeline'
 import type { AskFn, CompleteFn, PipelineResult } from './pipeline'
-import { shouldTrigger, stripRaw } from './trigger'
+import { isBackground, shouldTrigger, stripRaw } from './trigger'
 
 type Config = { enabled: boolean; minChars: number; minSignals: number; model: string; maxQuestions: number }
 
@@ -130,6 +130,13 @@ export const register: Register = (on, options) => {
     if (e.origin.kind !== 'composer' || e.command) return next(e)
     const stripped = stripRaw(e.text)
     if (stripped !== undefined) return next({ ...e, text: stripped })
+    let jobDir: string | undefined
+    try {
+      jobDir = await $.env.get('CLAUDE_JOB_DIR')
+    } catch {
+      jobDir = undefined
+    }
+    if (isBackground(jobDir)) return next(e)
     if (!cfg.enabled || !shouldTrigger(e.text, cfg)) return next(e)
     let answer: string | undefined
     try {

@@ -93,3 +93,11 @@ test('isAttachId e attachCommand', () => {
   expect(isAttachId('x"; rm')).toBe(false)
   expect(attachCommand('e003551f')).toBe('claude attach e003551f')
 })
+
+test('mergeSessions porta sessionId della viva; le chiuse solo-registro non lo hanno', () => {
+  const r = mergeSessions([live({ id: 'abc123', sessionId: 'sid-1' })], [reg({ id: 'dead01', stato: 'chiusa', ora: '2026-11-12T14:00:00' })], NOW)
+  expect(r.find(s => s.id === 'abc123')?.sessionId).toBe('sid-1')
+  const closed = r.find(s => s.id === 'dead01')
+  expect(closed).toBeDefined()
+  expect(closed?.sessionId).toBeUndefined()
+})

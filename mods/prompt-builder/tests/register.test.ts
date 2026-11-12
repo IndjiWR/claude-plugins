@@ -12,9 +12,9 @@ const typed = (text: string, kind = 'composer'): PromptSubmitInput =>
   ({ text, wait: false, origin: { kind } }) as unknown as PromptSubmitInput
 
 // replies: stringa = risposta; 'THROW' = rifiuto; 'FAIL' = non risposta
-const world = (on: On, replies: string[] = [ANALYSIS, BRIEF], answers: (string | undefined)[] = []) => {
+const world = (on: On, replies: string[] = [ANALYSIS, BRIEF], answers: (string | undefined)[] = [], env: Record<string, string> | null = {}) => {
   mock.store(on)
-  mock.env(on, { HOME: '/home/u' })
+  if (env) mock.env(on, { HOME: '/home/u', ...env })
   const st = {
     files: new Map<string, string>([[`${PLUGIN}/assets/brief-template.md`, 'TPL'], [`${PLUGIN}/assets/linea-guida.md`, 'LG']]),
     prompts: [] as PromptSubmitInput[],
@@ -154,4 +154,44 @@ test('session.start registra il comando', async ($, on) => {
   const st = world(on)
   await $.session.start({ cwd: ROOT } as never)
   expect(st.registered).toEqual(['prompt-builder'])
+})
+
+const BG = { CLAUDE_JOB_DIR: '/home/u/.claude/jobs/x' }
+
+test('sessione in background: prompt lungo intatto, nessuna ask', async ($, on) => {
+  const st = world(on, [ANALYSIS, BRIEF], [], BG)
+  const r = await $.prompt.submit(typed(LONG))
+  expect(r.text).toBe(LONG)
+  expect(st.asks.length).toBe(0)
+  expect(st.completes).toBe(0)
+})
+
+test('CLAUDE_JOB_DIR vuota: la domanda resta', async ($, on) => {
+  const st = world(on, [ANALYSIS, BRIEF], [], { CLAUDE_JOB_DIR: '' })
+  await $.prompt.submit(typed(LONG))
+  expect(st.asks.includes('Ottimizzo il prompt?')).toBe(true)
+})
+
+test('background con !raw: prefisso tolto', async ($, on) => {
+  world(on, [ANALYSIS, BRIEF], [], BG)
+  const r = await $.prompt.submit(typed('!raw ' + LONG))
+  expect(r.text.trim()).toBe(LONG.trim())
+})
+
+test('background: /prompt-builder compone ancora il brief', async ($, on) => {
+  const st = world(on, [ANALYSIS, BRIEF], ['Invia'], BG)
+  await $.command.run({ command: 'prompt-builder', args: ' ' + LONG, origin: { kind: 'composer' }, presentation: 'text' } as never)
+  for (let i = 0; i < 50 && st.prompts.length === 0; i++) await new Promise(r => setTimeout(r, 5))
+  expect(st.prompts.length).toBe(1)
+  expect(st.prompts[0].text.includes('# Brief: login')).toBe(true)
+})
+
+test('env.get che rifiuta: la domanda resta', async ($, on) => {
+  const st = world(on, [ANALYSIS, BRIEF], [], null)
+  on('env.get', (_, e) => {
+    if (e.name === 'CLAUDE_JOB_DIR') throw new Error('x')
+    return { value: '/home/u' } as never
+  })
+  await $.prompt.submit(typed(LONG))
+  expect(st.asks.includes('Ottimizzo il prompt?')).toBe(true)
 })
