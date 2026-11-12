@@ -15,6 +15,7 @@ Skill e mod per Claude Code, pubblicate come un unico marketplace di plugin.
 |---|---|---|
 | [auto-clear-context](mods/auto-clear-context) | mod | Handoff validato e `/clear` automatico vicino alle soglie di contesto |
 | [prompt-builder](mods/prompt-builder) | mod | Trasforma i prompt lunghi in un brief con intervista e proposte approvate prima che arrivino alla sessione |
+| [agent-monitor](mods/agent-monitor) | mod | Pannello live degli agenti della sessione: stato, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma |
 
 ## Struttura
 

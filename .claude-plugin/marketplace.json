@@ -12,6 +12,11 @@
       "name": "prompt-builder",
       "source": "./mods/prompt-builder",
       "description": "Prima che un prompt lungo arrivi alla sessione, lo trasforma in un brief chiaro con intervista e proposte approvate; ottimizza i consumi."
+    },
+    {
+      "name": "agent-monitor",
+      "source": "./mods/agent-monitor",
+      "description": "Pannello live degli agenti della sessione: stato, modello, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma."
     }
   ]
 }
