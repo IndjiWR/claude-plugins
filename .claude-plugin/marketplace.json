@@ -7,6 +7,11 @@
       "name": "auto-clear-context",
       "source": "./mods/auto-clear-context/mod",
       "description": "Vicino alle soglie di contesto Claude salva lo stato in un handoff validato; la mod esegue /clear e fa ripartire il lavoro nella sessione pulita."
+    },
+    {
+      "name": "prompt-builder",
+      "source": "./mods/prompt-builder",
+      "description": "Prima che un prompt lungo arrivi alla sessione, lo trasforma in un brief chiaro con intervista e proposte approvate; ottimizza i consumi."
     }
   ]
 }
