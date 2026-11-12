@@ -21,7 +21,7 @@ export type TurnUsageLike = {
 
 export const MAIN = 'main'
 export const MAIN_LABEL = 'Sessione principale'
-const ACTIVE = new Set(['pending', 'running', 'waiting', 'idle'])
+export const ACTIVE = new Set(['pending', 'running', 'waiting', 'idle'])
 
 const n = (v: number | undefined) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 
@@ -48,7 +48,6 @@ export function setModel(usage: UsageMap, agentId: string, model: string, now: n
 }
 
 const truncate = (s: string) => (s.length > 40 ? s.slice(0, 40) : s)
-export const ACTIVE_STATUSES = ACTIVE
 
 /** Etichetta unica per pannello e avvisi: nome, altrimenti descrizione, altrimenti id; "main" è la sessione principale. */
 export function agentLabel(id: string, agents: readonly AgentLike[]): string {
@@ -62,8 +61,8 @@ export function buildTree(agents: readonly AgentLike[], usage: UsageMap, now: nu
   const known = new Set(list.map((a) => a.id))
   const orphans = Object.keys(usage).filter((id) => id !== MAIN && !known.has(id))
   const nodes = new Map<string, { id: string; parentId?: string; status: string; label: string }>()
-  for (const a of list) nodes.set(a.id, { id: a.id, parentId: a.parentId, status: a.status, label: truncate(a.name ?? a.description) })
-  for (const id of orphans) nodes.set(id, { id, status: 'completed', label: truncate(id) })
+  for (const a of list) nodes.set(a.id, { id: a.id, parentId: a.parentId, status: a.status, label: agentLabel(a.id, agents) })
+  for (const id of orphans) nodes.set(id, { id, status: 'completed', label: agentLabel(id, agents) })
 
   const first = (id: string) => usage[id]?.firstAt ?? now
   const children = new Map<string, string[]>()

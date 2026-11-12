@@ -13,7 +13,7 @@ const AGENTS = [
   { id: 'a2', parentId: 'a1', status: 'completed', name: 'Figlio', description: 'x', type: 't' },
 ]
 
-type Cfg = { placed?: boolean; answer?: string; failList?: boolean; failStop?: boolean }
+type Cfg = { placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean }
 const world = (on: On, cfg: Cfg = {}) => {
   mock.store(on)
   const clock = mock.clock(on, { now: 1000 })
@@ -48,6 +48,7 @@ const world = (on: On, cfg: Cfg = {}) => {
     if (e.tool === 'AskUserQuestion') {
       const q = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
       st.asks.push(q)
+      if (st.cfg.dismiss) throw new Error('chiusa')
       return { result: { questions: [], answers: { [q]: st.cfg.answer } } } as never
     }
     st.stops.push(e)
@@ -155,5 +156,31 @@ test('agente completed: Transcript sì, Ferma no; main senza pulsanti', async ($
   expect(await ui.find({ key: 'stop-a2' })).toBeUndefined()
   expect(await ui.find({ key: 'stop-a1' })).toBeDefined()
   expect(await ui.find({ key: 'transcript-main' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('conferma chiusa senza risposta: niente TaskStop né toast', async ($, on) => {
+  const st = world(on, { dismiss: true })
+  await run($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'stop-a1' })
+  expect(st.stops).toEqual([])
+  expect(st.toasts).toEqual([])
+  await ui.unmount()
+})
+
+test('con agent.list che fallisce a lungo il timer resta vivo e poi azzera stale', async ($, on) => {
+  const st = world(on)
+  await run($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  st.cfg.failList = true
+  await st.clock.advance(2000 * 6)
+  const during = st.lists
+  await st.clock.advance(2000)
+  expect(st.lists).toBe(during + 1)
+  expect(await ui.find({ type: 'Text', text: /elenco non aggiornato/ })).toBeDefined()
+  st.cfg.failList = false
+  await st.clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: /elenco non aggiornato/ })).toBeUndefined()
   await ui.unmount()
 })

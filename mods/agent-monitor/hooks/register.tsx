@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
 import type { AgentSnapshot, AlertedMap, TokenCounts, UsageMap } from '../types'
-import { ACTIVE_STATUSES, MAIN, addTurn, agentLabel, buildTree, formatDuration, formatTokens, overThreshold, setModel, totals } from './ledger'
+import { ACTIVE, MAIN, addTurn, agentLabel, buildTree, formatDuration, formatTokens, overThreshold, setModel, totals } from './ledger'
 import type { AgentLike, Row } from './ledger'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
@@ -42,7 +42,9 @@ async function refresh($: Ctx) {
       at,
     }))
   } catch {
-    await update($, agentsAtom, (s) => ({ ...s, stale: true, at: s.at || -1 }))
+    // `at` cambia a ogni giro: il valore nuovo fa ridisegnare il pannello aperto, così il timer non si ferma.
+    const at = await $.clock.now().catch(() => 0)
+    await update($, agentsAtom, (s) => ({ ...s, stale: true, at: at || s.at || -1 }))
   }
 }
 
@@ -65,6 +67,7 @@ export const register: Register = (on, options) => {
   const limit = Number(opts?.alertTokens ?? 200000)
   const refreshMs = Math.max(500, Number(opts?.refreshMs ?? 2000) || 2000)
   on('session.start', async ($, e, next) => {
+    stopTimer()
     await $.command.register({
       name: 'agenti',
       description: 'Pannello live degli agenti: stato e consumi',
@@ -148,14 +151,19 @@ export const register: Register = (on, options) => {
                 }}
               />
             )}
-            {r.id !== MAIN && ACTIVE_STATUSES.has(status.get(r.id) ?? r.status) && (
+            {r.id !== MAIN && ACTIVE.has(status.get(r.id) ?? r.status) && (
               <Button
                 key={`stop-${r.id}`}
                 label="Ferma"
                 onPress={async () => {
+                  let answer: string
                   try {
-                    const answer = await $.ui.ask(`Fermo l'agente ${r.label}?`, ['Ferma', 'Annulla'])
-                    if (answer !== 'Ferma') return
+                    answer = await $.ui.ask(`Fermo l'agente ${r.label}?`, ['Ferma', 'Annulla'])
+                  } catch {
+                    return // conferma chiusa senza risposta: come "Annulla"
+                  }
+                  if (answer !== 'Ferma') return
+                  try {
                     await $.tool.call({ tool: 'TaskStop', task_id: r.id })
                     $.ui.toast(`Agente ${r.label} fermato`)
                   } catch (err) {
