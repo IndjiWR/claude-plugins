@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addTurn, bar, buildTree, formatCompact, countByStatus, tokensByModel, usageLevel, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from '../hooks/ledger'
+import { addTurn, agentLabel, bar, buildTree, formatCompact, countByStatus, tokensByModel, usageLevel, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from '../hooks/ledger'
 import type { AgentLike } from '../hooks/ledger'
 import type { UsageMap } from '../types'
 
@@ -35,7 +35,7 @@ test('setModel', () => {
 test('buildTree con radice, figlio, nipote, ordine e padre sconosciuto', () => {
   const usage: UsageMap = { main: u({ firstAt: 0 }), c: u({ firstAt: 20 }), b: u({ firstAt: 10 }), g: u({ firstAt: 30 }), o: u({ firstAt: 40 }) }
   const rows = buildTree(
-    [ag({ id: 'c', parentId: 'main' }), ag({ id: 'b', name: 'B' }), ag({ id: 'g', parentId: 'c' }), ag({ id: 'o', parentId: 'zzz' })],
+    [ag({ id: 'c', parentId: 'main' }), ag({ id: 'b', name: 'B', description: 'B' }), ag({ id: 'g', parentId: 'c' }), ag({ id: 'o', parentId: 'zzz' })],
     usage,
     100,
   )
@@ -51,9 +51,15 @@ test('label troncata a 40 con ellissi', () => {
   expect(rows[1].label).toBe('x'.repeat(40) + '…')
 })
 
-test('label: nome vuoto ricade sulla descrizione', () => {
-  const rows = buildTree([ag({ id: 'a', name: '', description: 'Desc' })], {}, 0)
+test('label: descrizione, poi nome, poi id', () => {
+  const rows = buildTree([ag({ id: 'a', name: 'Nome', description: 'Desc' })], {}, 0)
   expect(rows[1].label).toBe('Desc')
+})
+
+test('agentLabel: descrizione > nome > id', () => {
+  expect(agentLabel('a2', [ag({ id: 'a2', name: 'Figlio', description: 'Rivede il codice' })])).toBe('Rivede il codice')
+  expect(agentLabel('a2', [ag({ id: 'a2', name: 'Figlio', description: '' })])).toBe('Figlio')
+  expect(agentLabel('a2', [])).toBe('a2')
 })
 
 test('seedAgent fissa firstAt una volta; addTurn lo mantiene', () => {

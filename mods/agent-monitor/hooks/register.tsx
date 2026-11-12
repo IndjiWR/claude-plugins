@@ -69,11 +69,16 @@ async function refresh($: Ctx) {
     const at = await $.clock.now()
     const ids = list.map((a) => a.id).filter((id) => id !== MAIN)
     if (ids.length > 0) await update($, usageAtom, (u) => ids.reduce((acc, id) => seedAgent(acc, id, at), u))
-    await update($, agentsAtom, () => ({
-      list: list.map((a) => ({ id: a.id, parentId: a.parentId, status: a.status, name: a.name, description: a.description, type: a.type })),
-      stale: false,
-      at,
-    }))
+    const usage = await read($, usageAtom)
+    await update($, agentsAtom, (prev) => {
+      const fresh = list.map((a) => ({ id: a.id, parentId: a.parentId, status: a.status, name: a.name, description: a.description, type: a.type }))
+      const seen = new Set(fresh.map((a) => a.id))
+      // un agente sparito dall'elenco ma con consumi conserva etichetta e stato (se era attivo diventa completed)
+      const kept = (prev?.list ?? [])
+        .filter((a) => !seen.has(a.id) && a.id !== MAIN && usage[a.id])
+        .map((a) => (ACTIVE.has(a.status) ? { ...a, status: 'completed' } : a))
+      return { list: [...fresh, ...kept], stale: false, at }
+    })
   } catch {
     // `at` cambia a ogni giro: il valore nuovo fa ridisegnare il pannello aperto, così il timer non si ferma.
     const at = await $.clock.now().catch(() => 0)
@@ -322,7 +327,7 @@ export const register: Register = (on, options) => {
               {ACTIVE.has(sel.status) && <Button key={`stop-${sel.id}`} label="Ferma" onPress={() => stop(sel)} />}
             </Box>
             <Box key="detail"><Text dimColor>
-              {`in ${formatCompact(sel.tokens.input)} · out ${formatCompact(sel.tokens.output)} · cache ${formatCompact(sel.tokens.cacheRead)}+${formatCompact(sel.tokens.cacheWrite)}`}
+              {`id ${sel.id} · in ${formatCompact(sel.tokens.input)} · out ${formatCompact(sel.tokens.output)} · cache ${formatCompact(sel.tokens.cacheRead)}+${formatCompact(sel.tokens.cacheWrite)}`}
             </Text></Box>
           </Box>
         ) : (

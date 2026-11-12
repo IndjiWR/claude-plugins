@@ -10,7 +10,7 @@ const PANE = {
 
 const AGENTS = [
   { id: 'a1', status: 'running', description: 'Cerca file', type: 't' },
-  { id: 'a2', parentId: 'a1', status: 'completed', name: 'Figlio', description: 'x', type: 't' },
+  { id: 'a2', parentId: 'a1', status: 'completed', name: 'Figlio', description: 'Figlio desc', type: 't' },
 ]
 
 type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean }
@@ -90,7 +90,7 @@ test('render: radice, figlio con prefisso albero, riepilogo', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await tx(ui, 'label-main'))?.text).toContain('Sessione principale')
   expect((await tx(ui, 'label-a1'))?.text).toMatch(/^└ Cerca file|^├ Cerca file/)
-  expect((await tx(ui, 'label-a2'))?.text).toMatch(/^ {2}└ Figlio/)
+  expect((await tx(ui, 'label-a2'))?.text).toMatch(/^ {2}└ Figlio desc/)
   expect((await tx(ui, 'status-a1'))?.text).toContain('● run')
   expect((await tx(ui, 'status-a2'))?.text).toContain('✓ fin')
   expect((await tx(ui, 'head'))?.text).toMatch(/STATO.*AGENTE.*MODELLO.*TOKEN.*DUR.*TURNI/)
@@ -198,8 +198,22 @@ test('agente finito selezionato: Transcript sì, Ferma no, dettaglio token', asy
   await ui.press({ key: 'sel-a2' })
   expect(await ui.find({ key: 'transcript-a2' })).toBeDefined()
   expect(await ui.find({ key: 'stop-a2' })).toBeUndefined()
-  expect((await tx(ui, 'detail'))?.text).toBe('in 10 · out 5 · cache 3+4')
+  expect((await tx(ui, 'detail'))?.text).toBe('id a2 · in 10 · out 5 · cache 3+4')
   expect((await tx(ui, 'status-a2'))?.props.dimColor).toBe(true)
+  await ui.unmount()
+})
+
+test('agente sparito dall elenco: etichetta e stato conservati finché ha consumi', async ($, on) => {
+  const st = world(on)
+  await $.turn.complete(turn('a1', 'sonnet', 10, 5))
+  await run($)
+  st.cfg.agents = []
+  await st.clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Cerca file/ })).toBeDefined()
+  await ui.press({ key: 'sel-a1' })
+  expect((await tx(ui, 'detail'))?.text).toContain('id a1')
+  expect(await ui.find({ key: 'stop-a1' })).toBeUndefined()
   await ui.unmount()
 })
 

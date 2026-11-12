@@ -57,11 +57,11 @@ export function seedAgent(usage: UsageMap, agentId: string, now: number, model?:
 
 const truncate = (s: string) => (s.length > 40 ? s.slice(0, 40) + '…' : s)
 
-/** Etichetta unica per pannello e avvisi: nome, altrimenti descrizione, altrimenti id; "main" è la sessione principale. */
+/** Etichetta unica per pannello e avvisi: descrizione, altrimenti nome, altrimenti id; "main" è la sessione principale. */
 export function agentLabel(id: string, agents: readonly AgentLike[]): string {
   if (id === MAIN) return MAIN_LABEL
   const a = agents.find((x) => x.id === id)
-  return truncate(a ? a.name || a.description : id)
+  return truncate(a ? a.description || a.name || id : id)
 }
 
 export function buildTree(agents: readonly AgentLike[], usage: UsageMap, now: number): Row[] {

@@ -82,8 +82,8 @@ test('/agenti risponde con albero e totale', async ($, on) => {
   expect(text).toContain('Totale:')
 })
 
-test('toast usa l etichetta delle righe: nome, altrimenti descrizione troncata', async ($, on) => {
-  const st = world(on, [{ id: 'a1', status: 'running', description: 'D'.repeat(50), type: 't' }, { id: 'a2', status: 'running', name: 'Nome', description: 'x', type: 't' }])
+test('toast usa l etichetta delle righe: descrizione troncata, altrimenti nome', async ($, on) => {
+  const st = world(on, [{ id: 'a1', status: 'running', description: 'D'.repeat(50), type: 't' }, { id: 'a2', status: 'running', name: 'Nome', description: '', type: 't' }])
   await $.turn.complete(turn('a1', 250000))
   await $.turn.complete(turn('a2', 250000))
   expect(st.toasts).toEqual([
