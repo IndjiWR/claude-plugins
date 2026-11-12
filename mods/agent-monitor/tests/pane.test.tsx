@@ -14,7 +14,7 @@ const AGENTS = [
   { id: 'a2', parentId: 'a1', status: 'completed', name: 'Figlio', description: 'Figlio desc', type: 't' },
 ]
 
-type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean; agentsJson?: string; failAgentsCmd?: boolean; registry?: string | null }
+type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean; agentsJson?: string; failAgentsCmd?: boolean; rejectAgentsCmd?: boolean; registry?: string | null }
 const world = (on: On, cfg: Cfg = {}) => {
   mock.store(on)
   // serve a $.turn.complete(...) nei test che riempiono usage: senza handler terminale la chiamata non risolve
@@ -41,6 +41,7 @@ const world = (on: On, cfg: Cfg = {}) => {
   on('process.run', (_, e) => {
     if (e.argv[0] !== 'claude') return { value: { exitCode: 1, stdout: '', stderr: 'no' } } as never
     st.runs.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
+    if (st.cfg.rejectAgentsCmd) throw new Error('timeout')
     if (st.cfg.failAgentsCmd) return { value: { exitCode: 1, stdout: '', stderr: 'boom' } } as never
     return { value: { exitCode: 0, stdout: st.cfg.agentsJson ?? '[]', stderr: '' } } as never
   })
@@ -426,6 +427,13 @@ test('riga main: token senza colore di soglia', { options: { alertTokens: 1000 }
   await ui.unmount()
 })
 
+// Avanza di 2 s alla volta ridisegnando il pannello, così il timer non si ferma per inattività.
+const advanceDrawn = async ($: Parameters<typeof run>[0] & { ui: { mount: (i: never) => Promise<{ unmount: () => Promise<void> }> } }, st: { clock: { advance: (ms: number) => Promise<unknown> } }, ms: number) => {
+  for (let t = 0; t < ms; t += 2000) {
+    await st.clock.advance(2000)
+    await (await $.ui.mount({ ...PANE, surface: 'terminal' } as never)).unmount()
+  }
+}
 const LIVE = JSON.stringify([{ id: 's1', name: 'indji-x', kind: 'background', cwd: '/p/x', state: 'working' }])
 const REG_DEFAULT = '/Users/indji/Documents/Lavoro/Claude/Projects/Indji/coordinatrice/sessioni.json'
 
@@ -445,7 +453,7 @@ test('sessions refresh: comando fallito tiene la lista e segna stale', async ($,
   const before = (st.sessions!).list
   expect(before.length).toBe(1)
   st.cfg.failAgentsCmd = true
-  await st.clock.advance(2000)
+  await advanceDrawn($, st, 10_000)
   const snap = st.sessions!
   expect(snap.list).toEqual(before)
   expect(snap.stale).toBe(true)
@@ -464,4 +472,25 @@ test('sessions refresh: opzione vuota', { options: { sessionsRegistry: '' } }, a
   await run($)
   expect(st.reads).toEqual([])
   expect((st.sessions!).list.length).toBe(1)
+})
+
+test('sessions refresh: process.run che rifiuta tiene la lista e segna stale', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  const before = st.sessions!.list
+  st.cfg.rejectAgentsCmd = true
+  await advanceDrawn($, st, 10_000)
+  expect(st.sessions!.list).toEqual(before)
+  expect(st.sessions!.stale).toBe(true)
+})
+
+test('sessions refresh: al più una lettura ogni 10 s', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  expect(st.runs.length).toBe(1)
+  await advanceDrawn($, st, 2000)
+  expect(st.runs.length).toBe(1)
+  expect(st.lists).toBeGreaterThan(1)
+  await advanceDrawn($, st, 8000)
+  expect(st.runs.length).toBe(2)
 })

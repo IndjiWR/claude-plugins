@@ -67,11 +67,24 @@ type Ctx = StateDollar & {
 }
 let timer: Timer | undefined
 let lastRender = 0
+let lastSessionsRead: number | undefined
+const SESSIONS_MIN_MS = 10_000
 
 // Rilegge l'elenco; se rifiuta tiene l'ultimo e segna "non aggiornato".
 async function refresh($: Ctx, registryPath: string) {
-  // le sessioni non fanno mai fallire il refresh degli agenti
-  await refreshSessions($, registryPath).catch(() => {})
+  // in parallelo; le sessioni non fanno mai fallire il refresh degli agenti
+  await Promise.all([refreshAgents($), maybeRefreshSessions($, registryPath).catch(() => {})])
+}
+
+// Le sessioni si rileggono al più ogni SESSIONS_MIN_MS (il primo giro subito).
+async function maybeRefreshSessions($: Ctx, registryPath: string) {
+  const now = await $.clock.now()
+  if (lastSessionsRead !== undefined && now - lastSessionsRead < SESSIONS_MIN_MS) return
+  lastSessionsRead = now
+  await refreshSessions($, registryPath)
+}
+
+async function refreshAgents($: Ctx) {
   try {
     const list = await $.agent.list()
     const at = await $.clock.now()
@@ -98,6 +111,8 @@ async function refresh($: Ctx, registryPath: string) {
 async function refreshSessions($: Ctx, registryPath: string): Promise<void> {
   const at = await $.clock.now()
   let live
+  // comando e registro partono insieme
+  const regP = registryPath ? $.fs.read(registryPath).then(parseRegistry, () => []) : Promise.resolve([])
   try {
     const r = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 5000 })
     if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}`)
@@ -106,7 +121,7 @@ async function refreshSessions($: Ctx, registryPath: string): Promise<void> {
     await update($, sessionsAtom, (s) => ({ ...s, stale: true, at }))
     return
   }
-  const registry = registryPath ? await $.fs.read(registryPath).then(parseRegistry, () => []) : []
+  const registry = await regP
   const self = await $.session.id().catch(() => undefined)
   await update($, sessionsAtom, () => ({ list: mergeSessions(live, registry, at, self), stale: false, at }))
 }
@@ -136,6 +151,7 @@ export const register: Register = (on, options) => {
   const refreshMs = Math.max(500, Number(opts?.refreshMs ?? 2000) || 2000)
   on('session.start', async ($, e, next) => {
     stopTimer()
+    lastSessionsRead = undefined
     await $.command.register({
       name: 'agenti',
       description: 'Pannello live degli agenti: stato e consumi',
