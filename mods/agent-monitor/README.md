@@ -11,6 +11,21 @@ Mod per Claude Code: un pannello live accanto alla chat con gli agenti della ses
 - Si aggiorna ogni `refreshMs` (default 2000 ms) solo mentre il pannello è aperto.
 - Se la lista degli agenti non si legge, compare la nota "elenco non aggiornato".
 
+## Sessioni di progetto
+
+In cima al pannello la sezione **SESSIONI DI PROGETTO** elenca le sessioni in background.
+
+- **Fonti**: `claude agents --json` (sessioni vive) e il registro della coordinatrice `sessioni.json` (opzione `sessionsRegistry`; vuota = nessun registro). Si vedono le sessioni vive e quelle chiuse nelle ultime 24 ore.
+- **Stati**: `blocc` (in attesa di te, con il motivo), `lav`, `ferma`, `chiusa`; per le chiuse c'è l'esito.
+- **Lettura**: in parallelo agli agenti e al più ogni 10 s, per non lanciare `claude` a ogni aggiornamento.
+- **Dettaglio** della sessione scelta: `id · cwd`, motivo del blocco, esito.
+- **Copia attach**: copia `claude attach <id>` negli appunti. Gli id sono validati come esadecimali.
+- **Apri nel Terminale**: solo nella superficie terminale; apre una scheda di Terminal.app con `osascript`. Se fallisce, avviso e copia dell'attach.
+- Il testo di `/agenti` (fallback) elenca prima le sessioni.
+- I subagent sono etichettati per descrizione (poi nome, poi id); l'id è nella riga di dettaglio.
+
+**Limite del motore**: `$.ui.view` può passare solo agli agenti di questa sessione, quindi una mod non può portare la vista su un'altra sessione; si entra con `claude attach <id>`.
+
 ## Comandi
 
 - `/agenti` apre il pannello **Agenti**. Se non può essere posizionato, risponde con un riepilogo testuale.
@@ -32,6 +47,7 @@ Quando un agente supera la soglia `alertTokens` (token di input + output), compa
 | `alertTokens` | `200000` | Soglia di token per agente. `0` spegne l'allarme |
 | `refreshMs` | `2000` | Intervallo di aggiornamento in millisecondi. Minimo `500` |
 | `sessionBudget` | `0` | Budget di token della sessione per la barra del riepilogo; `0` la nasconde |
+| `sessionsRegistry` | percorso di `sessioni.json` della coordinatrice | Registro delle sessioni; vuoto = nessun registro |
 
 ## Limiti
 
