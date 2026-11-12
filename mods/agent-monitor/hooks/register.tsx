@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
-import type { AgentSnapshot, AlertedMap, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
+import type { AgentSnapshot, AlertedMap, ProjectSession, SessionsSnapshot, TokenCounts, UsageMap } from '../types'
 import { ACTIVE, MAIN, addTurn, agentLabel, bar, buildTree, countByStatus, formatCompact, formatDuration, formatTokens, overThreshold, seedAgent, setModel, shortModel, tokensByModel, totals, usageLevel } from './ledger'
 import type { AgentLike, Row } from './ledger'
-import { mergeSessions, parseAgents, parseRegistry } from './sessions'
+import { attachCommand, isAttachId, mergeSessions, parseAgents, parseRegistry } from './sessions'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
 const usageAtom = atom({ plugin: 'agent-monitor', key: 'usage' } as const, {} as UsageMap, { shape: 'usage-1' })
@@ -25,6 +25,13 @@ const STATUS_VIEW: Record<string, { glyph: string; label: string; color: string 
   failed: { glyph: '✗', label: 'err', color: 'error' },
   killed: { glyph: '■', label: 'stop', color: 'error' },
 }
+const SESSION_VIEW: Record<ProjectSession['state'], { glyph: string; label: string; color: string }> = {
+  blocked: { glyph: '◐', label: 'blocc', color: 'warning' },
+  working: { glyph: '●', label: 'lav', color: 'success' },
+  idle: { glyph: '○', label: 'ferma', color: 'subtle' },
+  closed: { glyph: '■', label: 'chiusa', color: 'inactive' },
+}
+const SESS = 's:'
 const FINISHED = new Set(['completed', 'failed', 'killed'])
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 const fit = (s: string, w: number) => (s.length > w ? s.slice(0, Math.max(0, w - 1)) + '…' : s.padEnd(w))
@@ -45,12 +52,25 @@ function treePrefix(rows: Row[], i: number): string {
   return out + (hasLater(d) ? '├ ' : '└ ')
 }
 
+const trunc = (s: string, w: number) => (s.length > w ? s.slice(0, Math.max(0, w - 1)) + '…' : s)
+
+// Riga di una sessione: glifo + stato, nome, progetto, esito troncato alla larghezza residua (sotto 50 colonne solo glifo e nome).
+function sessionLine(s: ProjectSession, cols: number): string {
+  const v = SESSION_VIEW[s.state]
+  if (cols < 50) return `${v.glyph} ${s.name}`
+  const head = `${v.glyph} ${v.label.padEnd(5)} ${s.name} · ${s.project}`
+  const room = cols - 2 - head.length - 3
+  return s.esito && room >= 4 ? `${head} · ${trunc(s.esito, room)}` : head
+}
+
 const counts = (t: TokenCounts) =>
   `in ${formatTokens(t.input)} / out ${formatTokens(t.output)} / cache ${formatTokens(t.cacheRead)}+${formatTokens(t.cacheWrite)}`
 
 const rowLine = (r: Row) =>
   `${'  '.repeat(r.depth)}${r.status} ${r.label} · ${r.model ?? '—'} · ${counts(r.tokens)} · ${formatDuration(r.durationMs)} · ${r.turns} turni`
 const totalLine = (tot: TokenCounts & { turns: number }) => `Totale: ${counts(tot)} · ${tot.turns} turni`
+
+const sessionText = (list: readonly ProjectSession[]) => list.map((s) => sessionLine(s, 120)).join('\n')
 
 export function textSummary(rows: Row[], tot: TokenCounts & { turns: number }): string {
   const lines = rows.map(rowLine)
@@ -200,6 +220,8 @@ export const register: Register = (on, options) => {
       return {}
     }
     const now = await $.clock.now()
+    await refreshSessions($, registryPath).catch(() => {})
+    const sessions = (await read($, sessionsAtom)).list
     const usage = await read($, usageAtom)
     let agents: readonly AgentLike[]
     let stale = false
@@ -212,6 +234,7 @@ export const register: Register = (on, options) => {
     return {
       text:
         `Il pannello non si apre qui (${opened.reason}).\n` +
+        (sessions.length > 0 ? sessionText(sessions) + '\n' : '') +
         textSummary(buildTree(agents, usage, now), totals(usage)) +
         (stale ? '\nelenco non aggiornato' : ''),
     }
@@ -238,7 +261,9 @@ export const register: Register = (on, options) => {
 
     // Selezione: quella scelta se l'agente c'è ancora, altrimenti il primo attivo (main escluso), altrimenti nessuna.
     const stored = await read($, selectedAtom)
-    const selId = rows.some((r) => r.id === stored) ? stored : (rows.find((r) => r.id !== MAIN && ACTIVE.has(r.status))?.id ?? '')
+    const sessSnap = await read($, sessionsAtom)
+    const selSession = stored.startsWith(SESS) ? sessSnap.list.find((s) => s.id === stored.slice(SESS.length)) : undefined
+    const selId = selSession ? '' : rows.some((r) => r.id === stored) ? stored : (rows.find((r) => r.id !== MAIN && ACTIVE.has(r.status))?.id ?? '')
     const sel = rows.find((r) => r.id === selId)
 
     // Colonne: < 70 niente TURNI né barra; < 50 solo glifo, nome e token.
@@ -303,6 +328,88 @@ export const register: Register = (on, options) => {
       }
     }
 
+    // Copia il comando attach (anche come ripiego): l'id viene validato prima di comporlo.
+    const copyAttach = async (id: string) => {
+      if (!isAttachId(id)) {
+        $.ui.toast(`Id non valido: ${id}`)
+        return false
+      }
+      const text = attachCommand(id)
+      try {
+        const r = await $.ui.copy({ text, surface: e.surface })
+        $.ui.toast(r.isCopied ? `Copiato: ${text}` : `Copia non riuscita (${r.reason})`)
+        return r.isCopied
+      } catch (err) {
+        $.ui.toast(`Copia non riuscita (${err instanceof Error ? err.message : String(err)})`)
+        return false
+      }
+    }
+    const openInTerminal = async (id: string) => {
+      if (!isAttachId(id)) {
+        $.ui.toast(`Id non valido: ${id}`)
+        return
+      }
+      try {
+        const r = await $.process.run(['osascript', '-e', `tell application "Terminal" to do script "${attachCommand(id)}"`, '-e', 'tell application "Terminal" to activate'])
+        if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}`)
+      } catch {
+        try {
+          await $.ui.copy({ text: attachCommand(id), surface: e.surface })
+        } catch {
+          // il toast sotto basta
+        }
+        $.ui.toast('Terminale non aperto: comando copiato')
+      }
+    }
+
+    const sessionsBlock = sessSnap.list.length > 0 && (
+      <Box key="sessions" flexDirection="column">
+        <Box key="sess-head"><Text dimColor bold>
+          SESSIONI DI PROGETTO
+        </Text></Box>
+        {sessSnap.list.map((s) => {
+          const picked = selSession?.id === s.id
+          const v = SESSION_VIEW[s.state]
+          return (
+            <Box key={`sess-row-${s.id}`} flexDirection="row">
+              <Button
+                key={`sess-sel-${s.id}`}
+                plain
+                label={picked ? '▸' : '○'}
+                onPress={async () => {
+                  await update($, selectedAtom, () => SESS + s.id)
+                }}
+              />
+              <Text> </Text>
+              <Text color={v.color} dimColor={s.state === 'closed' || undefined} bold={picked || undefined} inverse={picked || undefined}>
+                {sessionLine(s, cols)}
+              </Text>
+            </Box>
+          )
+        })}
+        {sessSnap.stale && <Text dimColor>sessioni non aggiornate</Text>}
+      </Box>
+    )
+
+    const sessionDetail = selSession && (
+      <Box flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          <Box key="actions"><Text bold>
+            {selSession.name}:
+          </Text></Box>
+          {selSession.state !== 'closed' && <Button key={`attach-copy-${selSession.id}`} label="Copia attach" onPress={() => copyAttach(selSession.id)} />}
+          {selSession.state !== 'closed' && e.surface === 'terminal' && (
+            <Button key={`attach-open-${selSession.id}`} label="Apri nel Terminale" onPress={() => openInTerminal(selSession.id)} />
+          )}
+        </Box>
+        <Box key="detail"><Text dimColor>
+          {`id ${selSession.id}${selSession.cwd ? ` · ${selSession.cwd}` : ''}`}
+        </Text></Box>
+        {selSession.reason && <Text color="warning">{`bloccata: ${selSession.reason}`}</Text>}
+        {selSession.esito && <Text dimColor>{`esito: ${selSession.esito}${selSession.esitoOra ? ` (${selSession.esitoOra})` : ''}`}</Text>}
+      </Box>
+    )
+
     return (
       <Box flexDirection="column">
         <Box key="summary" flexDirection="column" borderStyle="round" paddingX={1}>
@@ -324,6 +431,7 @@ export const register: Register = (on, options) => {
             </Text></Box>
           )}
         </Box>
+        {sessionsBlock}
         {snap.stale && <Text color="warning">elenco non aggiornato</Text>}
         <Box key="head"><Text dimColor bold>
           {'  ' + columns.map((c) => cell(c.header, c.w)).join('')}
@@ -353,7 +461,9 @@ export const register: Register = (on, options) => {
             </Box>
           )
         })}
-        {sel && sel.id !== MAIN ? (
+        {sessionDetail ? (
+          sessionDetail
+        ) : sel && sel.id !== MAIN ? (
           <Box flexDirection="column">
             <Box flexDirection="row" gap={1}>
               <Box key="actions"><Text bold>
