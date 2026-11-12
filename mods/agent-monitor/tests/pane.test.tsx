@@ -184,3 +184,17 @@ test('con agent.list che fallisce a lungo il timer resta vivo e poi azzera stale
   expect(await ui.find({ type: 'Text', text: /elenco non aggiornato/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('agente attivo visto dal refresh senza turni: durata cresce', async ($, on) => {
+  const st = world(on)
+  await run($)
+  await st.clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const t1 = (await ui.find({ type: 'Text', text: /running Cerca file/ }))?.text
+  expect(t1).toMatch(/· (0|1|2|3)s · 0 turni/)
+  await st.clock.advance(20000)
+  await ui.unmount()
+  const ui2 = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui2.find({ type: 'Text', text: /running Cerca file/ }))?.text).toMatch(/· (1[0-9]|2[0-9])s · 0 turni/)
+  await ui2.unmount()
+})

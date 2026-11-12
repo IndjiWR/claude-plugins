@@ -47,13 +47,21 @@ export function setModel(usage: UsageMap, agentId: string, model: string, now: n
   return { ...usage, [agentId]: { ...base, model } }
 }
 
-const truncate = (s: string) => (s.length > 40 ? s.slice(0, 40) : s)
+/** Prima volta che si vede un agente: fissa firstAt (e il modello, se noto); non tocca una voce già presente. */
+export function seedAgent(usage: UsageMap, agentId: string, now: number, model?: string): UsageMap {
+  const cur = usage[agentId]
+  if (cur) return model && !cur.model ? { ...usage, [agentId]: { ...cur, model } } : usage
+  const base = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, firstAt: now, lastAt: now }
+  return { ...usage, [agentId]: model ? { ...base, model } : base }
+}
+
+const truncate = (s: string) => (s.length > 40 ? s.slice(0, 40) + '…' : s)
 
 /** Etichetta unica per pannello e avvisi: nome, altrimenti descrizione, altrimenti id; "main" è la sessione principale. */
 export function agentLabel(id: string, agents: readonly AgentLike[]): string {
   if (id === MAIN) return MAIN_LABEL
   const a = agents.find((x) => x.id === id)
-  return truncate(a ? (a.name ?? a.description) : id)
+  return truncate(a ? a.name || a.description : id)
 }
 
 export function buildTree(agents: readonly AgentLike[], usage: UsageMap, now: number): Row[] {

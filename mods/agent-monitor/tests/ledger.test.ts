@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addTurn, buildTree, formatDuration, formatTokens, overThreshold, setModel, totals } from '../hooks/ledger'
+import { addTurn, buildTree, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from '../hooks/ledger'
 import type { AgentLike } from '../hooks/ledger'
 import type { UsageMap } from '../types'
 
@@ -46,9 +46,22 @@ test('buildTree con radice, figlio, nipote, ordine e padre sconosciuto', () => {
   expect(rows[1].durationMs).toBe(90)
 })
 
-test('label troncata a 40', () => {
+test('label troncata a 40 con ellissi', () => {
   const rows = buildTree([ag({ id: 'a', description: 'x'.repeat(60) })], {}, 0)
-  expect(rows[1].label.length).toBe(40)
+  expect(rows[1].label).toBe('x'.repeat(40) + '…')
+})
+
+test('label: nome vuoto ricade sulla descrizione', () => {
+  const rows = buildTree([ag({ id: 'a', name: '', description: 'Desc' })], {}, 0)
+  expect(rows[1].label).toBe('Desc')
+})
+
+test('seedAgent fissa firstAt una volta; addTurn lo mantiene', () => {
+  const s = seedAgent({}, 'a', 5)
+  expect(s.a.firstAt).toBe(5)
+  expect(seedAgent(s, 'a', 99)).toBe(s)
+  expect(seedAgent({}, 'b', 5, 'opus').b.model).toBe('opus')
+  expect(addTurn(s, 'a', { input_tokens: 1 }, 50).a.firstAt).toBe(5)
 })
 
 test("agente rimosso dall'elenco diventa completed", () => {

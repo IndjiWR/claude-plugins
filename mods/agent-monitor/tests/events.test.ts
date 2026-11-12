@@ -11,10 +11,12 @@ const world = (on: On, agents: unknown[] = []) => {
   mock.store(on)
   on('turn.complete', (_, e) => ({ text: e.answer }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
-  let t = 1000
-  on('clock.now', () => ({ value: (t += 10) }) as never)
-  const st = { toasts: [] as string[], views: [] as unknown[], registered: [] as unknown[], spawnId: 'new1' }
-  on('agent.list', () => ({ value: agents }) as never)
+  const st = { failList: false, t: 1000, step: 10, toasts: [] as string[], views: [] as unknown[], registered: [] as unknown[], spawnId: 'new1' }
+  on('clock.now', () => ({ value: (st.t += st.step) }) as never)
+  on('agent.list', () => {
+    if (st.failList) throw new Error('giù')
+    return { value: agents } as never
+  })
   on('ui.toast', (_, e) => {
     st.toasts.push((e as unknown as { text: string }).text)
     return { value: undefined } as never
@@ -85,7 +87,7 @@ test('toast usa l etichetta delle righe: nome, altrimenti descrizione troncata',
   await $.turn.complete(turn('a1', 250000))
   await $.turn.complete(turn('a2', 250000))
   expect(st.toasts).toEqual([
-    `Agente ${'D'.repeat(40)} oltre 200,0k token`,
+    `Agente ${'D'.repeat(40)}… oltre 200,0k token`,
     'Agente Nome oltre 200,0k token',
   ])
 })
@@ -109,4 +111,29 @@ test('textSummary', () => {
   const u = { a: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, turns: 5, firstAt: 0, lastAt: 0 } }
   const t = textSummary(buildTree([], u, 0), totals(u))
   expect(t.split('\n').pop()).toBe('Totale: in 1 / out 2 / cache 3+4 · 5 turni')
+})
+
+test('durata: spawn a t0, turno a t1 -> riga completata dura t1 - t0', async ($, on) => {
+  const st = world(on, [{ id: 'new1', status: 'completed', description: 'Job', type: 't' }])
+  st.step = 0
+  st.t = 1000
+  await $.agent.spawn({ prompt: 'x' } as never)
+  st.t = 6000
+  await $.turn.complete(turn('new1', 1))
+  st.t = 90000
+  expect(await summary($)).toContain('completed Job · sonnet · in 1 / out 0 / cache 0+0 · 5s')
+})
+
+test('due turn.complete concorrenti oltre soglia: un solo toast', async ($, on) => {
+  const st = world(on)
+  await Promise.all([$.turn.complete(turn('a1', 250000)), $.turn.complete(turn('a1', 1000))])
+  expect(st.toasts.length).toBe(1)
+})
+
+test('/agenti testo: agent.list rifiuta -> ultimo elenco e nota', async ($, on) => {
+  const st = world(on)
+  st.failList = true
+  const r = (await $.command.run({ command: 'agenti', args: '' } as never)) as { text: string }
+  expect(r.text).toContain('Sessione principale')
+  expect(r.text).toContain('elenco non aggiornato')
 })

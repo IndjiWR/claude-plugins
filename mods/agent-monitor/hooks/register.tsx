@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, Timer } from 'claude-code'
 
 import type { AgentSnapshot, AlertedMap, TokenCounts, UsageMap } from '../types'
-import { ACTIVE, MAIN, addTurn, agentLabel, buildTree, formatDuration, formatTokens, overThreshold, setModel, totals } from './ledger'
+import { ACTIVE, MAIN, addTurn, agentLabel, buildTree, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from './ledger'
 import type { AgentLike, Row } from './ledger'
 
 // Cambia il tag se cambia la forma del valore: un reload con un altro tag lo legge come assente.
@@ -36,6 +36,8 @@ async function refresh($: Ctx) {
   try {
     const list = await $.agent.list()
     const at = await $.clock.now()
+    const ids = list.map((a) => a.id).filter((id) => id !== MAIN)
+    if (ids.length > 0) await update($, usageAtom, (u) => ids.reduce((acc, id) => seedAgent(acc, id, at), u))
     await update($, agentsAtom, () => ({
       list: list.map((a) => ({ id: a.id, parentId: a.parentId, status: a.status, name: a.name, description: a.description, type: a.type })),
       stale: false,
@@ -56,9 +58,13 @@ function stopTimer() {
 function startTimer($: Ctx, refreshMs: number) {
   if (timer) return
   timer = $.clock.every(refreshMs, async () => {
-    await refresh($)
-    // Rete di sicurezza: se il pannello non viene più disegnato per 3 intervalli il timer si ferma.
-    if ((await $.clock.now()) - lastRender > refreshMs * 3) stopTimer()
+    try {
+      await refresh($)
+      // Rete di sicurezza: se il pannello non viene più disegnato per 3 intervalli il timer si ferma.
+      if ((await $.clock.now()) - lastRender > refreshMs * 3) stopTimer()
+    } catch {
+      // mai una rejection non gestita; il prossimo giro riprova
+    }
   })
 }
 
@@ -80,25 +86,25 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     const now = await $.clock.now()
     const usage = await update($, usageAtom, (u) => addTurn(u, e.agentId, e.usage, now))
-    const alerted = await read($, alertedAtom)
-    const over = overThreshold(usage, alerted, limit)
-    if (over.length > 0) {
-      const list = await $.agent.list()
-      for (const id of over) {
-        $.ui.toast(`Agente ${agentLabel(id, list)} oltre ${formatTokens(limit)} token`)
-      }
-      await update($, alertedAtom, (m) => ({ ...m, ...Object.fromEntries(over.map((id) => [id, true as const])) }))
+    let fresh: string[] = []
+    await update($, alertedAtom, (m) => {
+      fresh = overThreshold(usage, m, limit)
+      return fresh.length > 0 ? { ...m, ...Object.fromEntries(fresh.map((id) => [id, true as const])) } : m
+    })
+    if (fresh.length > 0) {
+      const list = await $.agent.list().catch(() => [] as readonly AgentLike[])
+      for (const id of fresh) $.ui.toast(`Agente ${agentLabel(id, list)} oltre ${formatTokens(limit)} token`)
     }
     return r
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {
     const r = await next(e)
-    if (e.model && r.agentId) {
+    if (r.agentId) {
       const id = r.agentId
       const model = e.model
       const now = await $.clock.now()
-      await update($, usageAtom, (u) => setModel(u, id, model, now))
+      await update($, usageAtom, (u) => (model ? setModel(u, id, model, now) : seedAgent(u, id, now)))
     }
     return r
   }).catch(($, e, next) => next(e))
@@ -117,8 +123,20 @@ export const register: Register = (on, options) => {
     }
     const now = await $.clock.now()
     const usage = await read($, usageAtom)
-    const agents = await $.agent.list()
-    return { text: `Il pannello non si apre qui (${opened.reason}).\n` + textSummary(buildTree(agents, usage, now), totals(usage)) }
+    let agents: readonly AgentLike[]
+    let stale = false
+    try {
+      agents = await $.agent.list()
+    } catch {
+      agents = (await read($, agentsAtom)).list
+      stale = true
+    }
+    return {
+      text:
+        `Il pannello non si apre qui (${opened.reason}).\n` +
+        textSummary(buildTree(agents, usage, now), totals(usage)) +
+        (stale ? '\nelenco non aggiornato' : ''),
+    }
   }).catch(($, e, next) => next(e))
 
   on('ui.close', async ($, e, next) => {

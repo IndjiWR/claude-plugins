@@ -22,7 +22,7 @@ Mod per Claude Code: un pannello live accanto alla chat con gli agenti della ses
 
 ## Allarme
 
-Quando un agente supera la soglia `alertTokens` (token di input + output), compare un avviso, una sola volta per agente. Con `0` l'allarme è spento.
+Quando un agente supera la soglia `alertTokens` (token di input + output), compare un avviso, una sola volta per ogni agente (esclusa la sessione principale). Con `0` l'allarme è spento.
 
 ## Opzioni (`/config`)
 
