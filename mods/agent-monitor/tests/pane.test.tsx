@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import type { SessionsSnapshot } from '../types'
 
 const PANE = {
   plugin: 'agent-monitor',
@@ -10,10 +11,10 @@ const PANE = {
 
 const AGENTS = [
   { id: 'a1', status: 'running', description: 'Cerca file', type: 't' },
-  { id: 'a2', parentId: 'a1', status: 'completed', name: 'Figlio', description: 'x', type: 't' },
+  { id: 'a2', parentId: 'a1', status: 'completed', name: 'Figlio', description: 'Figlio desc', type: 't' },
 ]
 
-type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean }
+type Cfg = { agents?: unknown[]; placed?: boolean; answer?: string; dismiss?: boolean; failList?: boolean; failStop?: boolean; agentsJson?: string; failAgentsCmd?: boolean; rejectAgentsCmd?: boolean; registry?: string | null; copy?: unknown; failOsascript?: boolean }
 const world = (on: On, cfg: Cfg = {}) => {
   mock.store(on)
   // serve a $.turn.complete(...) nei test che riempiono usage: senza handler terminale la chiamata non risolve
@@ -27,6 +28,11 @@ const world = (on: On, cfg: Cfg = {}) => {
     asks: [] as string[],
     stops: [] as unknown[],
     lists: 0,
+    runs: [] as { argv: readonly string[]; timeoutMs?: number }[],
+    reads: [] as string[],
+    copies: [] as { text: string; surface?: string }[],
+    scripts: [] as (readonly string[])[],
+    sessions: undefined as SessionsSnapshot | undefined,
     clock,
   }
   on('agent.list', () => {
@@ -34,9 +40,36 @@ const world = (on: On, cfg: Cfg = {}) => {
     if (st.cfg.failList) throw new Error('giù')
     return { value: st.cfg.agents ?? AGENTS } as never
   })
+  on('process.run', (_, e) => {
+    if (e.argv[0] === 'osascript') {
+      st.scripts.push(e.argv)
+      if (st.cfg.failOsascript) throw new Error('negato')
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
+    if (e.argv[0] !== 'claude') return { value: { exitCode: 1, stdout: '', stderr: 'no' } } as never
+    st.runs.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
+    if (st.cfg.rejectAgentsCmd) throw new Error('timeout')
+    if (st.cfg.failAgentsCmd) return { value: { exitCode: 1, stdout: '', stderr: 'boom' } } as never
+    return { value: { exitCode: 0, stdout: st.cfg.agentsJson ?? '[]', stderr: '' } } as never
+  })
+  on('fs.read', (_, e) => {
+    st.reads.push(e.path)
+    if (st.cfg.registry == null) throw new Error('ENOENT')
+    return { value: st.cfg.registry } as never
+  })
+  // ultimo valore scritto nell'atomo delle sessioni (il $ del test non legge lo stato)
+  on('state.set', async (_, e, next) => {
+    const w = e as unknown as { key: string; value: unknown }
+    if (w.key === 'sessions') st.sessions = (w.value as { value?: SessionsSnapshot }).value ?? (w.value as SessionsSnapshot)
+    return next(e)
+  })
   on('ui.open', (_, e) => {
     st.opens.push(e)
     return { value: st.cfg.placed ? { isPlaced: true } : { isPlaced: false, reason: 'troppo stretto' } } as never
+  })
+  on('ui.copy', (_, e) => {
+    st.copies.push({ text: e.text, surface: e.surface })
+    return { value: st.cfg.copy ?? { isCopied: true } } as never
   })
   on('ui.view', (_, e) => {
     st.views.push(e)
@@ -90,7 +123,7 @@ test('render: radice, figlio con prefisso albero, riepilogo', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await tx(ui, 'label-main'))?.text).toContain('Sessione principale')
   expect((await tx(ui, 'label-a1'))?.text).toMatch(/^└ Cerca file|^├ Cerca file/)
-  expect((await tx(ui, 'label-a2'))?.text).toMatch(/^ {2}└ Figlio/)
+  expect((await tx(ui, 'label-a2'))?.text).toMatch(/^ {2}└ Figlio desc/)
   expect((await tx(ui, 'status-a1'))?.text).toContain('● run')
   expect((await tx(ui, 'status-a2'))?.text).toContain('✓ fin')
   expect((await tx(ui, 'head'))?.text).toMatch(/STATO.*AGENTE.*MODELLO.*TOKEN.*DUR.*TURNI/)
@@ -198,8 +231,22 @@ test('agente finito selezionato: Transcript sì, Ferma no, dettaglio token', asy
   await ui.press({ key: 'sel-a2' })
   expect(await ui.find({ key: 'transcript-a2' })).toBeDefined()
   expect(await ui.find({ key: 'stop-a2' })).toBeUndefined()
-  expect((await tx(ui, 'detail'))?.text).toBe('in 10 · out 5 · cache 3+4')
+  expect((await tx(ui, 'detail'))?.text).toBe('id a2 · in 10 · out 5 · cache 3+4')
   expect((await tx(ui, 'status-a2'))?.props.dimColor).toBe(true)
+  await ui.unmount()
+})
+
+test('agente sparito dall elenco: etichetta e stato conservati finché ha consumi', async ($, on) => {
+  const st = world(on)
+  await $.turn.complete(turn('a1', 'sonnet', 10, 5))
+  await run($)
+  st.cfg.agents = []
+  await st.clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Cerca file/ })).toBeDefined()
+  await ui.press({ key: 'sel-a1' })
+  expect((await tx(ui, 'detail'))?.text).toContain('id a1')
+  expect(await ui.find({ key: 'stop-a1' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -389,4 +436,244 @@ test('riga main: token senza colore di soglia', { options: { alertTokens: 1000 }
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await tx(ui, 'tokens-main'))?.props.color).toBeUndefined()
   await ui.unmount()
+})
+
+// Avanza di 2 s alla volta ridisegnando il pannello, così il timer non si ferma per inattività.
+const advanceDrawn = async ($: Parameters<typeof run>[0] & { ui: { mount: (i: never) => Promise<{ unmount: () => Promise<void> }> } }, st: { clock: { advance: (ms: number) => Promise<unknown> } }, ms: number) => {
+  for (let t = 0; t < ms; t += 2000) {
+    await st.clock.advance(2000)
+    await (await $.ui.mount({ ...PANE, surface: 'terminal' } as never)).unmount()
+  }
+}
+const LIVE = JSON.stringify([{ id: 's1', name: 'indji-x', kind: 'background', cwd: '/p/x', state: 'working' }])
+const REG_DEFAULT = '/Users/indji/Documents/Lavoro/Claude/Projects/Indji/coordinatrice/sessioni.json'
+
+test('sessions refresh: legge claude agents --json e il registro', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  expect(st.runs[0]).toEqual({ argv: ['claude', 'agents', '--json'], timeoutMs: 5000 })
+  expect(st.reads).toEqual([REG_DEFAULT])
+  const snap = st.sessions!
+  expect(snap.stale).toBe(false)
+  expect(snap.list.find((s) => s.id === 's1')?.state).toBe('working')
+})
+
+test('sessions refresh: comando fallito tiene la lista e segna stale', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  const before = (st.sessions!).list
+  expect(before.length).toBe(1)
+  st.cfg.failAgentsCmd = true
+  await advanceDrawn($, st, 10_000)
+  const snap = st.sessions!
+  expect(snap.list).toEqual(before)
+  expect(snap.stale).toBe(true)
+})
+
+test('sessions refresh: registro illeggibile', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: null })
+  await run($)
+  const snap = st.sessions!
+  expect(snap.stale).toBe(false)
+  expect(snap.list.map((s) => s.id)).toEqual(['s1'])
+})
+
+test('sessions refresh: opzione vuota', { options: { sessionsRegistry: '' } }, async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  expect(st.reads).toEqual([])
+  expect((st.sessions!).list.length).toBe(1)
+})
+
+test('sessions refresh: process.run che rifiuta tiene la lista e segna stale', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  const before = st.sessions!.list
+  st.cfg.rejectAgentsCmd = true
+  await advanceDrawn($, st, 10_000)
+  expect(st.sessions!.list).toEqual(before)
+  expect(st.sessions!.stale).toBe(true)
+})
+
+test('sessions refresh: al più una lettura ogni 10 s', async ($, on) => {
+  const st = world(on, { agentsJson: LIVE, registry: '{}' })
+  await run($)
+  expect(st.runs.length).toBe(1)
+  await advanceDrawn($, st, 2000)
+  expect(st.runs.length).toBe(1)
+  expect(st.lists).toBeGreaterThan(1)
+  await advanceDrawn($, st, 8000)
+  expect(st.runs.length).toBe(2)
+})
+
+// --- sezione sessioni di progetto ---
+const SLIVE = JSON.stringify([
+  { id: 'e003551f', name: 'pf', kind: 'background', cwd: '/p/pf', state: 'working' },
+  { id: 'abc12345', name: 'tw', kind: 'background', cwd: '/p/tw', state: 'blocked', waitingFor: 'permesso Bash' },
+])
+const SREG = JSON.stringify({
+  pf: { nome: 'pf', id: 'e003551f', stato: 'avviata', esito: 'fatto il task 2', esito_ora: '2026-11-12T14:00:00' },
+  gone: { nome: 'old', id: 'cccccc01', stato: 'avviata', ora: '2026-11-12T10:00:00', esito: 'finita' },
+})
+const openPane = async ($: Parameters<typeof run>[0] & { ui: { mount: (i: never) => Promise<Mounted & { press: (q: { key: string }) => Promise<unknown>; unmount: () => Promise<void> }> } }, surface: 'terminal' | 'desktop' = 'terminal', cols = 120) => {
+  await run($)
+  return $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: cols }, surface } as never)
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`sessioni (${surface}): sezione con bloccata prima, nome, progetto ed esito`, async ($, on) => {
+    world(on, { agentsJson: SLIVE, registry: SREG })
+    const ui = await openPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /SESSIONI DI PROGETTO/ })).toBeDefined()
+    const blocked = await ui.find({ type: 'Text', text: /◐ blocc.*tw/ })
+    const working = await ui.find({ type: 'Text', text: /● lav.*pf.*fatto il task 2/ })
+    expect(blocked).toBeDefined()
+    expect(working).toBeDefined()
+    expect(blocked!.props.color).toBe('warning')
+    expect(working!.props.color).toBe('success')
+    const keys = (await ui.find({ key: 'sess-row-abc12345' }))!
+    expect(keys).toBeDefined()
+    const closed = await ui.find({ type: 'Text', text: /■ chiusa.*old/ })
+    expect(closed?.props.dimColor).toBe(true)
+    await ui.unmount()
+  })
+
+  test(`sessioni (${surface}): nessuna sessione, nessuna intestazione`, async ($, on) => {
+    world(on, { agentsJson: '[]', registry: '{}' })
+    const ui = await openPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /SESSIONI DI PROGETTO/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`sessioni (${surface}): prima lettura fallita, lista vuota: riga "sessioni non aggiornate" senza intestazione`, async ($, on) => {
+    world(on, { failAgentsCmd: true, registry: '{}' })
+    const ui = await openPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /sessioni non aggiornate/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /SESSIONI DI PROGETTO/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`sessioni (${surface}): Copia attach e toast, anche in caso di errore`, async ($, on) => {
+    const st = world(on, { agentsJson: SLIVE, registry: SREG })
+    const ui = await openPane($, surface)
+    await ui.press({ key: 'sess-sel-e003551f' })
+    await ui.press({ key: 'attach-copy-e003551f' })
+    expect(st.copies).toEqual([{ text: 'claude attach e003551f', surface }])
+    expect(st.toasts).toContain('Copiato: claude attach e003551f')
+    st.cfg.copy = { isCopied: false, reason: 'no-clipboard' }
+    await ui.press({ key: 'attach-copy-e003551f' })
+    expect(st.toasts).toContain('Copia non riuscita (no-clipboard)')
+    await ui.unmount()
+  })
+
+  test(`sessioni (${surface}): id non valido, nessuna copia né osascript`, async ($, on) => {
+    const st = world(on, { agentsJson: JSON.stringify([{ id: 'x"; rm', name: 'bad', kind: 'background', cwd: '/p/bad', state: 'working' }]), registry: '{}' })
+    const ui = await openPane($, surface)
+    await ui.press({ key: 'sess-sel-x"; rm' })
+    expect(await ui.find({ key: 'attach-copy-x"; rm' })).toBeDefined()
+    await ui.press({ key: 'attach-copy-x"; rm' })
+    if (surface === 'terminal') await ui.press({ key: 'attach-open-x"; rm' })
+    expect(st.toasts.filter((t) => t === 'Id non valido: x"; rm').length).toBe(surface === 'terminal' ? 2 : 1)
+    expect(st.copies).toEqual([])
+    expect(st.scripts).toEqual([])
+    await ui.unmount()
+  })
+}
+
+test('sessioni: Apri nel Terminale solo su terminal, con osascript', async ($, on) => {
+  const st = world(on, { agentsJson: SLIVE, registry: SREG })
+  let ui = await openPane($, 'desktop')
+  await ui.press({ key: 'sess-sel-e003551f' })
+  expect(await ui.find({ key: 'attach-open-e003551f' })).toBeUndefined()
+  await ui.unmount()
+  ui = await openPane($, 'terminal')
+  await ui.press({ key: 'sess-sel-e003551f' })
+  await ui.press({ key: 'attach-open-e003551f' })
+  expect(st.scripts).toEqual([['osascript', '-e', 'tell application "Terminal" to do script "claude attach e003551f"', '-e', 'tell application "Terminal" to activate']])
+  expect(st.copies).toEqual([])
+  await ui.unmount()
+})
+
+test('sessioni: osascript che rifiuta, toast e copia del comando', async ($, on) => {
+  const st = world(on, { agentsJson: SLIVE, registry: SREG, failOsascript: true })
+  const ui = await openPane($, 'terminal')
+  await ui.press({ key: 'sess-sel-e003551f' })
+  await ui.press({ key: 'attach-open-e003551f' })
+  expect(st.toasts).toContain('Terminale non aperto: comando copiato')
+  expect(st.copies).toEqual([{ text: 'claude attach e003551f', surface: 'terminal' }])
+  await ui.unmount()
+})
+
+test('sessioni: osascript e copia falliscono, un solo toast di errore', async ($, on) => {
+  const st = world(on, { agentsJson: SLIVE, registry: SREG, failOsascript: true, copy: { isCopied: false, reason: 'no-clipboard' } })
+  const ui = await openPane($, 'terminal')
+  await ui.press({ key: 'sess-sel-e003551f' })
+  await ui.press({ key: 'attach-open-e003551f' })
+  expect(st.toasts).toContain('Terminale non aperto: copia non riuscita')
+  expect(st.toasts.filter((t) => /Copia non riuscita|Copiato|comando copiato/.test(t))).toEqual([])
+  await ui.unmount()
+})
+
+test('sessioni: dettaglio con id, cwd, motivo ed esito; chiusa senza pulsanti', async ($, on) => {
+  world(on, { agentsJson: SLIVE, registry: SREG })
+  const ui = await openPane($, 'terminal')
+  await ui.press({ key: 'sess-sel-abc12345' })
+  expect(await ui.find({ type: 'Text', text: /id abc12345 · \/p\/tw/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /permesso Bash/ })).toBeDefined()
+  expect(await ui.find({ key: 'attach-copy-abc12345' })).toBeDefined()
+  await ui.press({ key: 'sess-sel-cccccc01' })
+  expect(await ui.find({ key: 'sess-sel-cccccc01' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /finita/ })).toBeDefined()
+  expect(await ui.find({ key: 'attach-copy-cccccc01' })).toBeUndefined()
+  expect(await ui.find({ key: 'attach-open-cccccc01' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('sessioni: bodyColumns 40, solo glifo e nome', async ($, on) => {
+  world(on, { agentsJson: SLIVE, registry: SREG })
+  const ui = await openPane($, 'terminal', 40)
+  const row = await ui.find({ type: 'Text', text: /● pf/ })
+  expect(row).toBeDefined()
+  expect(row!.text).not.toContain('lav')
+  expect(row!.text).not.toContain('fatto')
+  await ui.unmount()
+})
+
+test('sessioni: stale mostra "sessioni non aggiornate"', async ($, on) => {
+  const st = world(on, { agentsJson: SLIVE, registry: SREG })
+  await run($)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+  expect(await ui.find({ type: 'Text', text: /sessioni non aggiornate/ })).toBeUndefined()
+  await ui.unmount()
+  st.cfg.failAgentsCmd = true
+  await advanceDrawn($, st, 10_000)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+  expect(await ui.find({ type: 'Text', text: /sessioni non aggiornate/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /● lav/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('sessioni: selezione di una sessione sparita torna al primo agente attivo', async ($, on) => {
+  const st = world(on, { agentsJson: SLIVE, registry: '{}' })
+  let ui = await openPane($, 'terminal')
+  await ui.press({ key: 'sess-sel-e003551f' })
+  expect(await ui.find({ key: 'attach-copy-e003551f' })).toBeDefined()
+  expect((await ui.find({ key: 'sel-a1' }))?.props.label).toBe('○')
+  await ui.unmount()
+  st.cfg.agentsJson = '[]'
+  await advanceDrawn($, st, 10_000)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+  expect(await ui.find({ key: 'attach-copy-e003551f' })).toBeUndefined()
+  expect((await ui.find({ key: 'sel-a1' }))?.props.label).toBe('▸')
+  await ui.unmount()
+})
+
+test('fallback testuale: le sessioni vengono prima del riepilogo agenti', async ($, on) => {
+  world(on, { placed: false, agentsJson: SLIVE, registry: SREG })
+  const r = (await run($)) as { text: string }
+  const lines = r.text.split('\n')
+  expect(lines[0]).toContain('Il pannello non si apre qui')
+  expect(lines[1]).toMatch(/^◐ blocc.*tw/)
+  expect(lines[2]).toMatch(/^● lav.*pf/)
+  expect(r.text.indexOf('tw')).toBeLessThan(r.text.indexOf('Sessione principale'))
 })

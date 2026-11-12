@@ -16,7 +16,7 @@
     {
       "name": "agent-monitor",
       "source": "./mods/agent-monitor",
-      "description": "Pannello live degli agenti della sessione: stato, modello, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma."
+      "description": "Pannello live degli agenti e delle sessioni di progetto: stato, modello, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma/attach."
     }
   ]
 }
