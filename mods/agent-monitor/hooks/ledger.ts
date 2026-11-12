@@ -146,3 +146,50 @@ export function formatDuration(ms: number): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ${p2(s % 60)}s`
   return `${Math.floor(s / 3600)}h ${p2(Math.floor((s % 3600) / 60))}m`
 }
+
+export type StatusCounts = { active: number; waiting: number; pending: number; done: number; failed: number }
+
+export function countByStatus(rows: Row[]): StatusCounts {
+  const c: StatusCounts = { active: 0, waiting: 0, pending: 0, done: 0, failed: 0 }
+  for (const r of rows) {
+    if (r.id === MAIN) continue
+    if (r.status === 'running' || r.status === 'idle') c.active++
+    else if (r.status === 'waiting') c.waiting++
+    else if (r.status === 'pending') c.pending++
+    else if (r.status === 'completed') c.done++
+    else if (r.status === 'failed' || r.status === 'killed') c.failed++
+  }
+  return c
+}
+
+export function shortModel(model: string | undefined): string {
+  if (!model) return '?'
+  for (const k of ['haiku', 'sonnet', 'opus']) if (model.includes(k)) return k
+  return model
+}
+
+export function tokensByModel(usage: UsageMap): Array<{ model: string; tokens: number }> {
+  const by = new Map<string, number>()
+  for (const u of Object.values(usage)) {
+    const k = shortModel(u.model)
+    by.set(k, (by.get(k) ?? 0) + u.input + u.output)
+  }
+  return [...by].map(([model, tokens]) => ({ model, tokens })).sort((a, b) => b.tokens - a.tokens)
+}
+
+const PARTIAL = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
+
+export function bar(value: number, max: number, width: number): string {
+  const w = Math.max(0, Math.floor(width))
+  if (!(max > 0) || !(value > 0)) return ' '.repeat(w)
+  const cells = Math.min(1, value / max) * w
+  const full = Math.floor(cells)
+  const part = full < w ? PARTIAL[Math.floor((cells - full) * 8)] : ''
+  return ('█'.repeat(full) + part).padEnd(w, ' ')
+}
+
+export function usageLevel(tokens: number, limit: number): 'ok' | 'warn' | 'over' {
+  if (!(limit > 0)) return 'ok'
+  if (tokens >= limit) return 'over'
+  return tokens >= limit * 0.7 ? 'warn' : 'ok'
+}

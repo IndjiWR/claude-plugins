@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addTurn, buildTree, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from '../hooks/ledger'
+import { addTurn, bar, buildTree, countByStatus, tokensByModel, usageLevel, formatDuration, formatTokens, overThreshold, seedAgent, setModel, totals } from '../hooks/ledger'
 import type { AgentLike } from '../hooks/ledger'
 import type { UsageMap } from '../types'
 
@@ -94,4 +94,48 @@ test('formatDuration', () => {
   expect(formatDuration(45000)).toBe('45s')
   expect(formatDuration(185000)).toBe('3m 05s')
   expect(formatDuration(3720000)).toBe('1h 02m')
+})
+
+const row = (id: string, status: string) => ({ id, depth: 1, label: id, status, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, durationMs: 0, turns: 0 })
+
+test('countByStatus raggruppa e ignora main', () => {
+  const rows = [row('main', 'running'), row('a', 'running'), row('b', 'idle'), row('c', 'waiting'), row('d', 'pending'), row('e', 'completed'), row('f', 'failed'), row('g', 'killed')]
+  expect(countByStatus(rows)).toEqual({ active: 2, waiting: 1, pending: 1, done: 1, failed: 2 })
+})
+
+test('tokensByModel raggruppa per nome corto, ordina, "?" se manca', () => {
+  const m: UsageMap = {
+    a: u({ input: 100, output: 50, model: 'claude-haiku-4-5' }),
+    b: u({ input: 300, output: 100, model: 'claude-sonnet-4' }),
+    c: u({ input: 10, output: 10, model: 'claude-sonnet-5' }),
+    d: u({ input: 1, output: 1 }),
+    e: u({ input: 5, output: 5, model: 'custom-x' }),
+  }
+  expect(tokensByModel(m)).toEqual([
+    { model: 'sonnet', tokens: 420 },
+    { model: 'haiku', tokens: 150 },
+    { model: 'custom-x', tokens: 10 },
+    { model: '?', tokens: 2 },
+  ])
+})
+
+test('bar: celle piene, parziale, riempimento', () => {
+  expect(bar(5, 10, 10)).toBe('█████     ')
+  expect(bar(10, 10, 4)).toBe('████')
+  expect(bar(0, 10, 4)).toBe('    ')
+  expect(bar(1, 8, 1)).toBe('▏')
+  expect(bar(6, 8, 1)).toBe('▊')
+  expect(bar(7, 8, 1)).toBe('▉')
+  expect(bar(5, 0, 3)).toBe('   ')
+  expect(bar(99, 10, 3)).toBe('███')
+  expect(bar(25, 100, 4)).toBe('█   ')
+  expect(bar(30, 100, 4)).toBe('█▏  ')
+})
+
+test('usageLevel soglie', () => {
+  expect(usageLevel(10, 0)).toBe('ok')
+  expect(usageLevel(69, 100)).toBe('ok')
+  expect(usageLevel(70, 100)).toBe('warn')
+  expect(usageLevel(99, 100)).toBe('warn')
+  expect(usageLevel(100, 100)).toBe('over')
 })
