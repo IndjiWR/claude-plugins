@@ -48,6 +48,13 @@ test('compositionPrompt include template, risposte, proposte e taglia', () => {
   for (const s of ['TEMPLATE-X', 'Quale?', 'Vue', 'aperta?', 'Test e2e', 'progetto']) expect(all).toContain(s)
 })
 
+test('compositionPrompt nomina le sezioni condizionali', () => {
+  const all = compositionPrompt('GL', 'T', 'p', [], [], [], 'piccolo').map(x => x.text).join('\n')
+  expect(all).toContain('includi sempre tutte le sezioni')
+  expect(all).toContain('"Piano subagent" (se la taglia non è progetto')
+  expect(all).toContain('"Domande aperte" (se non ne restano)')
+})
+
 test('shortenPrompt', () => {
   expect(shortenPrompt('BRIEF').map(x => x.text).join('\n')).toContain('6.000')
 })
