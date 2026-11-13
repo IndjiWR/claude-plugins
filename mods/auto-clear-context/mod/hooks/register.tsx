@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentZoneNote, appendGaps, parseVerdict, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, appendGaps, leadFallback, parseVerdict, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -36,6 +36,7 @@ import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, Thres
 // `session` è l'id nel frontmatter, se c'è; `path` il file da cui viene.
 type Handoff = { text: string; status: string; session: string | undefined; id: string; path: string }
 type ClearRecord = { at: number; handoff: string }
+type RestartRecord = { at: number; agent: string; handoff: string }
 type Field = ThresholdField
 type Pair = Record<Field, number>
 type Limits = { soft: number; hard: number; margin: number }
@@ -49,6 +50,8 @@ const HOUR_MS = 3_600_000
 const RETRY_MS = 300
 const CLEARS_KEY = 'clears'
 const CLEARS_KEPT = 20
+const RESTARTS_KEY = 'restarts'
+const RESTARTS_KEPT = 20
 const EVENTS_KEPT = 300
 const BUSY = ['pending', 'running', 'waiting']
 
@@ -175,6 +178,10 @@ const checking = new Set<string>()
 const validating = new Map<string, { agentId: string; path: string; round: number }>()
 // I giri già fatti per teammate: se il teammate riscrive il file senza `rounds`, il conto non riparte da 0.
 const doneRounds = new Map<string, number>()
+// Rilancio del teammate: tetto orario (come i clear), rilanci in corso e handoff già passati alla principale.
+let maxRestartsPerHour = 3
+const restarting = new Set<string>()
+const handedToLead = new Set<string>()
 const VALIDATOR = 'auto-clear-context:handoff-validator'
 const AGENT_INPUTS = { plugin: 'auto-clear-context', key: 'agentInputs' } as const
 // La sessione che l'ultimo /clear ha chiuso: SessionStart (clear) allega il suo
@@ -285,15 +292,21 @@ const readOwnHandoff = async ($: EngineInterface, session: string): Promise<Hand
   return undefined
 }
 
-// $.fs non cancella: l'handoff si copia in archive/ e il suo file resta vuoto.
-const archive = async ($: EngineInterface, handoff: Handoff) => {
+// Copia l'handoff in archive/ lasciando intatto il suo file.
+const archiveCopy = async ($: EngineInterface, handoff: Handoff) => {
   await ensureExcluded($)
   const { archive: dir } = await paths($)
   const stamp = new Date(await $.clock.now()).toISOString().replace(/[:.]/g, '-')
   const name = `${stamp}-${handoff.id}.md`
   await $.fs.write(`${dir}/${name}`, handoff.text)
-  await $.fs.write(handoff.path, '')
   return `${HANDOFF_DIR}/archive/${name}`
+}
+
+// $.fs non cancella: l'handoff si copia in archive/ e il suo file resta vuoto.
+const archive = async ($: EngineInterface, handoff: Handoff) => {
+  const archived = await archiveCopy($, handoff)
+  await $.fs.write(handoff.path, '')
+  return archived
 }
 
 const runClear = ($: EngineInterface, canRetry: boolean) => {
@@ -680,9 +693,90 @@ const agentZoneContext = async ($: EngineInterface, agentId: string, configured:
   return agentZoneNote(kindOf(info), zone, percent, limits, agentHandoffPath(session, agentId), info.type)
 }
 
-// Rilancio del teammate con l'handoff validato: lo implementa il Task 4.
+// Un tool chiamato dalla mod che non è andato a buon fine: il motivo, altrimenti niente.
+const refusalOf = (outcome: { deny?: string; isError?: boolean; text?: string }) =>
+  outcome.deny ?? (outcome.isError === true ? (outcome.text ?? 'errore del tool') : undefined)
+
+// Riserva: stop o rilancio non riusciti, le istruzioni vanno alla principale (una sola volta per handoff).
+const handToLead = async ($: EngineInterface, agentId: string, name: string, handoff: Handoff, reason: string) => {
+  handedToLead.add(handoff.id)
+  log($, `teammate ${short(agentId)}: rilancio non riuscito (${reason}); istruzioni alla sessione principale, l'handoff resta in pending/`)
+  const text = leadFallback(name, agentHandoffPath(await $.session.id(), agentId), reason)
+  $.prompt.submit({ text }).then(
+    submitted => {
+      if (submitted.drop !== undefined) log($, `istruzioni di rilancio alla principale scartate: ${submitted.drop}`)
+    },
+    error => log($, `istruzioni di rilancio alla principale rifiutate: ${errorText(error)}`),
+  )
+}
+
+// Il teammate fermato non ha più bisogno delle mappe per agente.
+const forgetAgent = (agentId: string) => {
+  agentTokens.delete(agentId)
+  doneRounds.delete(agentId)
+  checking.delete(agentId)
+}
+
+// Rilancio del teammate con l'handoff validato: TaskStop, poi $.agent.spawn con l'input originale dell'Agent
+// (o i dati della lista, se non è registrato). Il teammate nuovo non è in ownAgents: torna sotto il monitor.
 const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handoff) => {
-  log($, `handoff ${handoff.id} del teammate ${short(agentId)} validato: rilancio non ancora implementato`)
+  if (!agentsEnabled || restarting.has(agentId) || handedToLead.has(handoff.id)) return
+  restarting.add(agentId)
+  try {
+    const info = await findAgent($, agentId)
+    if (info === undefined) {
+      log($, `teammate ${short(agentId)} non più in elenco: nessun rilancio`)
+      return
+    }
+    if (info.status !== 'idle') {
+      log($, `handoff ${handoff.id} validato, ma il teammate ${short(agentId)} è ${info.status}: rilancio al suo prossimo fine turno`)
+      return
+    }
+    const now = await $.clock.now()
+    const restarts = ((await $.store.get(RESTARTS_KEY)) as RestartRecord[] | undefined) ?? []
+    if (restarts.some(restart => restart.agent === agentId && restart.handoff === handoff.id)) {
+      log($, `l'handoff ${handoff.id} ha già avuto il suo rilancio: nessun nuovo rilancio`)
+      return
+    }
+    if (restarts.filter(restart => restart.agent === agentId && now - restart.at < HOUR_MS).length >= maxRestartsPerHour) {
+      reportOnce($, handoff, `limite di ${maxRestartsPerHour} rilanci in un'ora per il teammate ${short(agentId)}: l'handoff ${handoff.id} resta in attesa`)
+      return
+    }
+    const input = await orElse(read($, { ...AGENT_INPUTS, id: agentId }), undefined)
+    const name = input?.name ?? info.teammateId?.split('@')[0] ?? agentId
+    const archived = await archiveCopy($, handoff)
+    const prompt = agentResume(handoff.text, archived)
+    let newId: string | undefined
+    try {
+      const stop = await $.tool.call({ tool: 'TaskStop', task_id: agentId })
+      const stopRefused = refusalOf(stop)
+      if (stopRefused !== undefined) return await handToLead($, agentId, name, handoff, `TaskStop non riuscito: ${stopRefused}`)
+      // Il motore non lascia a un plugin il tool Agent via $.tool.call ("that is $.agent.spawn"): si rilancia
+      // con $.agent.spawn, con nome, tipo, modello e descrizione dell'input originale (o della lista).
+      const subagentType = input?.subagent_type ?? (info.type === 'teammate' ? undefined : info.type)
+      const spawned = await $.agent.spawn({
+        name,
+        description: input?.description ?? info.description,
+        prompt,
+        ...(subagentType === undefined ? {} : { subagentType }),
+        ...(input?.model === undefined ? {} : { model: input.model }),
+      })
+      if (spawned.deny !== undefined) return await handToLead($, agentId, name, handoff, `Agent non riuscito: ${spawned.deny}`)
+      newId = spawned.agentId
+    } catch (error) {
+      return await handToLead($, agentId, name, handoff, errorText(error))
+    }
+    await $.store.set(RESTARTS_KEY, [...restarts, { at: now, agent: agentId, handoff: handoff.id }].slice(-RESTARTS_KEPT))
+    forgetAgent(agentId)
+    // Il nuovo teammate si rilancia uguale al prossimo giro: l'input passa al suo id.
+    if (newId !== undefined && input !== undefined) {
+      await orElse($.state.set({ ...AGENT_INPUTS, id: newId }, input), undefined)
+    }
+    await $.fs.write(handoff.path, '')
+    log($, `teammate ${short(agentId)} fermato e rilanciato${newId === undefined ? '' : ` come ${short(newId)}`} con l'handoff ${handoff.id} (copia in ${archived})`)
+  } finally {
+    restarting.delete(agentId)
+  }
 }
 
 const roundsOf = (text: string) => Number(frontField(/^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '', 'rounds') ?? 0) || 0
@@ -706,6 +800,8 @@ const checkTeammate = async ($: EngineInterface, agentId: string) => {
     const { root } = await paths($)
     const path = `${root}/${agentHandoffPath(session, agentId)}`
     const handoff = await readHandoff($, path)
+    // Handoff già validato e rilancio rimandato (il teammate era in lavoro): ora il turno è finito.
+    if (handoff?.status === 'validated') return await restartAgent($, agentId, handoff)
     if (handoff?.status !== 'ready') return
     const round = Math.max(roundsOf(handoff.text), doneRounds.get(agentId) ?? 0) + 1
     const spawned = await $.agent.spawn({
@@ -770,6 +866,7 @@ export const register: Register = (on, options) => {
     hardThreshold: Number(options.hardThreshold ?? DEFAULTS.hardThreshold),
   }
   const maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
+  maxRestartsPerHour = maxClearsPerHour
   agentsEnabled = options.agents !== false
   const agentThreshold = Number(options.agentThreshold ?? 0)
 

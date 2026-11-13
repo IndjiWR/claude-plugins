@@ -30,11 +30,17 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
   const state = {
     tokens: 0 as number | null,
     files: new Map<string, string>(),
-    spawns: [] as { subagentType?: string; prompt: string }[],
+    spawns: [] as { subagentType?: string; prompt: string; name?: string; description?: string }[],
+    logs: [] as string[],
+    throws: new Set<string>(),
     // Se impostato, la risposta del fondo di tool.call di Agent (un teammate avviato dal modello).
     agentRecord: undefined as object | undefined,
     agentCalls: 0,
     sends: [] as { to: unknown; text: string }[],
+    // Ogni tool.call che arriva al fondo, in ordine; `denied` rifiuta il tool con quel motivo.
+    toolCalls: [] as Record<string, unknown>[],
+    denied: new Map<string, string>(),
+    prompts: [] as string[],
   }
   on('session.id', () => ({ value: 's1' }))
   on('session.root', () => ({ value: 'C:/progetto' }))
@@ -53,21 +59,34 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
   // $.agent.spawn della mod: l'input arriva nella forma del tool Agent (subagent_type). Il motore di prova
   // non dà l'id dell'agente avviato: la mod lo trova in agent.list, dove stanno i validatori v1 e v2.
   on('agent.spawn', (_, e) => {
-    const call = e as unknown as { prompt: string; subagent_type?: string }
-    state.spawns.push({ subagentType: call.subagent_type, prompt: call.prompt })
+    const call = e as unknown as { prompt: string; subagent_type?: string; name?: string; description?: string }
+    const refusal = state.denied.get('agent.spawn')
+    if (refusal !== undefined) return { deny: refusal } as never
+    state.spawns.push({ subagentType: call.subagent_type, prompt: call.prompt, name: call.name, description: call.description })
     return { model: 'm' }
   })
   // Il fondo di tool.call di Agent: la risposta di un teammate avviato dal modello, se impostata.
-  on('tool.call', () => {
+  on('tool.call', (_, e) => {
     state.agentCalls++
+    state.toolCalls.push(e as unknown as Record<string, unknown>)
+    if (state.throws.has(e.tool)) throw new Error(`${e.tool} è esploso`)
+    const denial = state.denied.get(e.tool)
+    if (denial !== undefined) return { deny: denial } as never
     return { result: state.agentRecord, text: 'ok' } as never
+  })
+  on('prompt.submit', (_, e) => {
+    state.prompts.push(e.text)
+    return { text: e.text } as never
   })
   on('session.send', (_, e) => {
     state.sends.push({ to: e.to, text: e.text })
     return { isDelivered: true } as never
   })
   on('fs.stat', (_, e) => ({ deny: `ENOENT ${e.path}` }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_, e) => {
+    state.logs.push((e as unknown as { text: string }).text)
+    return { value: undefined }
+  })
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('classic.PostToolUse', () => ({}))
@@ -149,7 +168,7 @@ test('la principale senza agent_id non riceve note dai passi degli agenti', asyn
 // Validazione dell'handoff di un teammate.
 const FILE = '.claude/handoff/pending/s1--a1.md'
 const validator = (id: string) => ({ id, type: 'auto-clear-context:handoff-validator', description: 'v', status: 'running' })
-const teammate = [{ id: 'a1', teammateId: 'pose@t', type: 'general-purpose', description: 'x', status: 'idle' }, validator('v1'), validator('v2')]
+const teammate = [{ id: 'a1', teammateId: 'pose@t', type: 'general-purpose', description: 'x', status: 'running' }, validator('v1'), validator('v2')]
 const ready = (extra = '') => `---\nstatus: ready\nagent: a1\n${extra}---\n# Handoff\n\n## Prossimo passo immediato\nFare x.\n`
 const done = (agentId: string, answer = 'ok') =>
   ({ answer, durationMs: 1, isAborted: false, turnId: `t-${agentId}`, reason: 'answer', agentId }) as never
@@ -269,4 +288,170 @@ test('tool.call di Agent: se $.state.set lancia, il risultato passa e il teammat
   const result = await $.tool.call({ tool: 'Agent', name: 'pose', description: 'posa', prompt: 'x' } as never)
   expect(result.deny).toBeUndefined()
   expect(state.agentCalls).toBe(1)
+})
+
+// Stop e rilancio del teammate. Il motore non lascia a un plugin il tool Agent via $.tool.call:
+// il rilancio passa da TaskStop (tool.call) e da $.agent.spawn.
+const idleMate = () => [
+  { id: 'a1', teammateId: 'pose@t', type: 'general-purpose', description: 'x', status: 'idle' },
+  validator('v1'),
+  validator('v2'),
+]
+// Lascia correre le promesse non attese (il prompt alla principale parte senza await).
+const pause = async () => {
+  for (let turn = 0; turn < 20; turn++) await Promise.resolve()
+}
+const toolsCalled = (state: { toolCalls: Record<string, unknown>[] }) => state.toolCalls.map(call => call.tool)
+const archived = (state: { files: Map<string, string> }) => [...state.files.keys()].filter(key => key.startsWith('.claude/handoff/archive/'))
+// I rilanci: gli spawn che non sono validatori.
+const restarted = (state: { spawns: { subagentType?: string; prompt: string; name?: string; description?: string }[] }) =>
+  state.spawns.filter(spawn => spawn.subagentType !== 'auto-clear-context:handoff-validator')
+
+// Il teammate `a1` avviato dal modello (input registrato in $.state).
+const launched = async ($: Engine, state: ReturnType<typeof world>) => {
+  state.agentRecord = { status: 'teammate_spawned', agentId: 'a1', agent_id: 'a1', teammate_id: 'pose@t', name: 'pose', prompt: 'x' }
+  await $.tool.call({ tool: 'Agent', name: 'pose', subagent_type: 'general-purpose', model: 'haiku', description: 'posa', prompt: 'x' } as never)
+  state.toolCalls.length = 0
+}
+// Un handoff pronto e il verdetto "completo" del validatore.
+const validate = async ($: Engine, state: ReturnType<typeof world>, text = ready(), validatorId = 'v1') => {
+  state.files.set(FILE, text)
+  await turnEnd($, 'a1')
+  await turnEnd($, validatorId, 'LACUNE: nessuna\nVERDETTO: completo')
+}
+
+test('handoff validato, teammate idle: TaskStop, poi rilancio con l input originale e l handoff; pending vuoto, copia in archive', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  await validate($, state)
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.toolCalls[0]).toMatchObject({ task_id: 'a1' })
+  const [call, ...others] = restarted(state)
+  expect(others.length).toBe(0)
+  expect(call).toMatchObject({ name: 'pose', subagentType: 'general-purpose', description: 'posa' })
+  expect(call?.prompt).toContain('Fare x.')
+  expect(state.files.get(FILE)).toBe('')
+  const [copy, ...rest] = archived(state)
+  expect(rest.length).toBe(0)
+  expect(state.files.get(copy ?? '')).toContain('status: validated')
+  expect(call?.prompt).toContain(copy ?? 'nessuna copia')
+  expect(state.prompts.length).toBe(0)
+})
+
+test('senza input registrato: spawn con name, tipo e description della lista', async ($, on) => {
+  const state = world(on, idleMate())
+  await validate($, state)
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  const [call, ...others] = restarted(state)
+  expect(others.length).toBe(0)
+  expect(call).toMatchObject({ name: 'pose', subagentType: 'general-purpose', description: 'x' })
+  expect(call?.prompt).toContain('Fare x.')
+  expect(state.files.get(FILE)).toBe('')
+})
+
+test('il teammate rilanciato torna sotto il monitor, il validatore no; le mappe del vecchio id sono ripulite', async ($, on) => {
+  const list: object[] = idleMate()
+  const state = world(on, list)
+  await launched($, state)
+  // Contesto alto di a1 registrato dal turn.step, senza che la nota sia ancora uscita.
+  state.tokens = 450_000
+  const it = $.turn.step(stepInput('a1'))
+  while (!(await it.next()).done);
+  await validate($, state)
+  expect(restarted(state).length).toBe(1)
+  // a1 è fermato: il suo contesto è stato dimenticato, nessuna nota.
+  expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
+  // Il nuovo teammate è in elenco e viene misurato; il validatore resta escluso.
+  list.push({ id: 'a2', teammateId: 'pose@t', type: 'general-purpose', description: 'posa', status: 'running' })
+  const [note] = await step($, state, 450_000, 'a2')
+  expect(note).toContain('s1--a2.md')
+  expect((await step($, state, 450_000, 'v1')).length).toBe(0)
+})
+
+test('lo stesso handoff non si rilancia due volte', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  await validate($, state)
+  expect(restarted(state).length).toBe(1)
+  // Il teammate (ancora in elenco) riscrive lo stesso identico file validato.
+  state.files.set(FILE, state.files.get(archived(state)[0] ?? '') ?? '')
+  await turnEnd($, 'a1')
+  expect(restarted(state).length).toBe(1)
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.logs.some(line => line.includes('ha già avuto il suo rilancio'))).toBe(true)
+})
+
+test('oltre maxClearsPerHour rilanci di a1 nell ora: nessun rilancio e una riga di log', { options: { maxClearsPerHour: 1 } }, async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  await validate($, state)
+  expect(restarted(state).length).toBe(1)
+  await validate($, state, ready('extra: 1\n'), 'v2')
+  expect(restarted(state).length).toBe(1)
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.files.get(FILE)).toContain('status: validated')
+  expect(state.logs.some(line => line.includes('limite di 1 rilanci'))).toBe(true)
+})
+
+test('teammate tornato running: nessun rilancio ora, al suo prossimo turn.complete sì', async ($, on) => {
+  const list = idleMate()
+  const state = world(on, list)
+  await launched($, state)
+  Object.assign(list[0] ?? {}, { status: 'running' })
+  await validate($, state)
+  expect(toolsCalled(state)).toEqual([])
+  expect(restarted(state).length).toBe(0)
+  expect(state.files.get(FILE)).toContain('status: validated')
+  Object.assign(list[0] ?? {}, { status: 'idle' })
+  await turnEnd($, 'a1')
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(restarted(state).length).toBe(1)
+  expect(state.files.get(FILE)).toBe('')
+})
+
+test('TaskStop rifiutato: nessun rilancio, un prompt alla principale, un secondo turn.complete non ne manda altri', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  state.denied.set('TaskStop', 'permesso negato')
+  await validate($, state)
+  await pause()
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(restarted(state).length).toBe(0)
+  expect(state.prompts.length).toBe(1)
+  expect(state.prompts[0]).toContain('pose')
+  expect(state.prompts[0]).toContain('permesso negato')
+  expect(state.prompts[0]).toContain('s1--a1.md')
+  expect(state.files.get(FILE)).toContain('status: validated')
+  await turnEnd($, 'a1')
+  await pause()
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.prompts.length).toBe(1)
+})
+
+test('spawn del rilancio rifiutato: un solo prompt alla principale, il file resta validated', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  state.files.set(FILE, ready())
+  await turnEnd($, 'a1')
+  state.denied.set('agent.spawn', 'limite di agenti')
+  await turnEnd($, 'v1', 'LACUNE: nessuna\nVERDETTO: completo')
+  await pause()
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.prompts.length).toBe(1)
+  expect(state.prompts[0]).toContain('limite di agenti')
+  expect(state.files.get(FILE)).toContain('status: validated')
+  await turnEnd($, 'a1')
+  await pause()
+  expect(state.prompts.length).toBe(1)
+})
+
+test('TaskStop che lancia: un solo prompt alla principale, nessun rilancio', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  state.throws.add('TaskStop')
+  await validate($, state)
+  await pause()
+  expect(restarted(state).length).toBe(0)
+  expect(state.prompts.length).toBe(1)
+  expect(state.files.get(FILE)).toContain('status: validated')
 })
