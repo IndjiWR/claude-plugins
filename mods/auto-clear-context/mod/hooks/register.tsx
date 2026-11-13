@@ -1,6 +1,8 @@
 import { atom, read, update } from 'claude-code'
-import type { ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
+import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
 
+import { agentHandoffPath, agentLimits, agentZoneNote } from './agents'
+import type { AgentKind } from './agents'
 import type { ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
 // Vicino alle soglie di contesto Claude salva lo stato in un handoff validato
@@ -160,6 +162,12 @@ const PENDING_WRITE = { plugin: 'auto-clear-context', key: 'pendingWrite' } as c
 let pendingNote: { session: string; zone: ThresholdZone; text: string } | undefined
 let lastCheckAt = 0
 let isClearRequested = false
+// Contesto dell'ultimo passo di ogni agente (turn.step) e finestra della principale, su cui se ne calcola la percentuale.
+const agentTokens = new Map<string, number>()
+let mainWindow: number | undefined
+// Gli agenti avviati dalla mod (validatori, teammate rilanciati): niente note di zona.
+const ownAgents = new Set<string>()
+let agentsEnabled = true
 // La sessione che l'ultimo /clear ha chiuso: SessionStart (clear) allega il suo
 // handoff, perché la sessione nuova ha già un altro id.
 let clearedSession: string | undefined
@@ -416,6 +424,11 @@ const readAutoCompact = async ($: EngineInterface) => {
 const buildNote = async ($: EngineInterface, zone: ThresholdZone, percent: number, limits: Limits, session: string) =>
   zoneNote(zone, percent, limits, zone === 3 ? await readAutoCompact($) : AUTO_COMPACT_PERCENT, session)
 
+const findAgent = async ($: EngineInterface, agentId: string): Promise<AgentInfo | undefined> =>
+  (await orElse($.agent.list(), [] as readonly AgentInfo[])).find(agent => agent.id === agentId)
+
+const kindOf = (info: AgentInfo): AgentKind => (info.teammateId === undefined ? 'subagent' : 'teammate')
+
 const readSignaled = async ($: EngineInterface, session: string) =>
   (await orElse(read($, { ...SIGNALED, id: session }), undefined)) ?? 0
 
@@ -636,6 +649,25 @@ const describeOverrides = (settings: Settings, window: number | undefined) => {
   return `${field === 'threshold' ? 'Morbida' : 'Dura'} salvata dalla mod; in /config resta ${describeThreshold(settings.inConfig[field], window)}`
 }
 
+// La nota di zona per un agente, una volta per zona: il suo handoff lo scrive lui.
+const agentZoneContext = async ($: EngineInterface, agentId: string, configured: Pair, agentThreshold: number): Promise<string | undefined> => {
+  const tokens = agentTokens.get(agentId)
+  if (!agentsEnabled || tokens === undefined || ownAgents.has(agentId)) return undefined
+  const limits = agentLimits(await effectiveLimits($, configured), agentThreshold)
+  if (limits.soft <= 0) return undefined
+  mainWindow ??= (await $.session.usage()).context.window
+  if (!(mainWindow > 0)) return undefined
+  const percent = Math.round((tokens * 100) / mainWindow)
+  const zone = zoneOf(percent, limits)
+  if (zone === 0) return undefined
+  const info = await findAgent($, agentId)
+  if (info === undefined) return undefined
+  const session = await $.session.id()
+  if (!(await markSignaled($, `${session}:${agentId}`, zone))) return undefined
+  log($, `agente ${short(agentId)} al ${percent}% (${ZONE_NAMES[zone]}): nota di handoff`)
+  return agentZoneNote(kindOf(info), zone, percent, limits, agentHandoffPath(session, agentId), info.type)
+}
+
 export const register: Register = (on, options) => {
   // Le soglie di /config; quelle in vigore le dà readSettings a ogni controllo.
   const configured: Pair = {
@@ -643,11 +675,14 @@ export const register: Register = (on, options) => {
     hardThreshold: Number(options.hardThreshold ?? DEFAULTS.hardThreshold),
   }
   const maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
+  agentsEnabled = options.agents !== false
+  const agentThreshold = Number(options.agentThreshold ?? 0)
 
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
     // Il pannello di /soglia, se è aperto, segue l'uso del contesto.
     if (e.changed.includes('context')) $.ui.invalidate('ui.render')
+    mainWindow = e.context.window
     const percent = e.context.percent
     if (percent === undefined) return result
     const limits = await effectiveLimits($, configured)
@@ -663,7 +698,10 @@ export const register: Register = (on, options) => {
 
   on('classic.PostToolUse', async ($, e, next) => {
     const result = await next(e)
-    if (e.agent_id !== undefined) return result
+    if (e.agent_id !== undefined) {
+      const note = await agentZoneContext($, e.agent_id, configured, agentThreshold)
+      return note === undefined ? result : { ...result, additionalContext: [...(result.additionalContext ?? []), note] }
+    }
     const now = await $.clock.now()
     if (now - lastCheckAt < CHECK_EVERY_MS) return result
     lastCheckAt = now
@@ -679,6 +717,18 @@ export const register: Register = (on, options) => {
     log($, `contesto al ${percent}% (${ZONE_NAMES[zone]}) durante il turno: segnalato a Claude`)
     return { ...result, additionalContext: [...(result.additionalContext ?? []), await buildNote($, zone, percent, limits, session)] }
   }).catch(($, e, next) => next(e))
+
+  // Streaming: i pezzi passano intatti; si legge solo l'usage del passo di un agente.
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    const usage = result.usage
+    if (e.agentId !== undefined && usage != null) {
+      agentTokens.set(e.agentId, usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens)
+    }
+    return result
+  }).catch(async function* ($, e, next) {
+    return yield* next(e)
+  })
 
   on('prompt.submit', async ($, e, next) => {
     if (pendingNote === undefined) return next(e)
