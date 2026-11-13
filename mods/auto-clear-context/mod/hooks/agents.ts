@@ -28,6 +28,9 @@ export const agentLimits = (main: Limits, agentThreshold: number): Limits => {
 
 export const agentHandoffPath = (session: string, agentId: string) => `${HANDOFF_DIR}/pending/${session}--${agentId}.md`
 
+// L'id dell'agente è la parte del nome file dopo "--".
+const agentIdOf = (path: string) => /--([^/]+)\.md$/.exec(path)?.[1] ?? ''
+
 const levels = (limits: Limits) => `${limits.soft}/${limits.hard}%, margine di sicurezza al ${limits.margin}%`
 
 // La nota che la mod allega a un agente quando il suo contesto entra in una zona.
@@ -44,7 +47,7 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, percent: number,
       `${seen}.`,
       when,
       `Scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff (stato, decisioni, file toccati, prossimo passo, «Verifica alla ripresa»), con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`,
-      'Per il validatore: non lanciare il validatore, lo fa la mod. Poi chiudi il turno con una sola riga.',
+      'Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con una sola riga.',
       'La mod ferma questo teammate e lo rilancia con lo stesso nome, tipo e modello, dandogli l\'handoff come prompt.',
     ].join(' ')
   }
@@ -57,9 +60,6 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, percent: number,
   ].join(' ')
 }
 
-// L'id dell'agente è la parte del nome file dopo "--".
-const agentIdOf = (path: string) => /--([^/]+)\.md$/.exec(path)?.[1] ?? ''
-
 // Nota agli agenti attivi quando la principale sta per ripartire con /clear.
 export const pauseNote = () =>
   [
@@ -70,8 +70,8 @@ export const pauseNote = () =>
 // Il verdetto del validatore: righe LACUNE: … e VERDETTO: completo | da integrare.
 export const parseVerdict = (answer: string): { isComplete: boolean; gaps: string } => {
   const verdict = /^\s*VERDETTO:\s*(.*)$/im.exec(answer)
-  const isComplete = verdict !== null && /completo/i.test(verdict[1]) && !/da integrare/i.test(verdict[1])
-  const gaps = /LACUNE:([\s\S]*?)(?=^\s*VERDETTO:|$(?![\s\S]))/im.exec(answer)?.[1]?.trim() ?? ''
+  const isComplete = verdict !== null && /\bcompleto\b/i.test(verdict[1]) && !/da integrare/i.test(verdict[1])
+  const gaps = /LACUNE:([\s\S]*?)(?=^\s*VERDETTO:|$(?![\s\S]))/m.exec(answer)?.[1]?.trim() ?? ''
   return { isComplete, gaps }
 }
 

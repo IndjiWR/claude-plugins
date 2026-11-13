@@ -20,7 +20,7 @@ test('agentZoneNote: teammate', () => {
   expect(note).toContain(path)
   expect(note).toContain('status: ready')
   expect(note).toContain('agent: a7')
-  expect(note).toContain('non lanciare il validatore')
+  expect(note).toContain('Non lanciare il validatore: lo fa la mod.')
   expect(agentZoneNote('teammate', 3, 80, main, path, 'general-purpose')).toContain('subito')
 })
 
@@ -39,6 +39,7 @@ test('pauseNote: la principale riparte', () => {
 test('parseVerdict', () => {
   expect(parseVerdict('LACUNE:\n- manca X\nVERDETTO: da integrare')).toEqual({ isComplete: false, gaps: '- manca X' })
   expect(parseVerdict('LACUNE: nessuna\nVERDETTO: completo').isComplete).toBe(true)
+  expect(parseVerdict('LACUNE: x\nVERDETTO: incompleto').isComplete).toBe(false)
   expect(parseVerdict('niente').isComplete).toBe(false)
 })
 
