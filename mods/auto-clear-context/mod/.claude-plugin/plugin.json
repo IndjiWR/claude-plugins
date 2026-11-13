@@ -32,7 +32,7 @@
     "agentSoftTokens": {
       "type": "number",
       "title": "Soglia morbida degli agenti (token)",
-      "description": "Token di contesto di un subagent o teammate oltre i quali riceve la nota per scrivere l'handoff. 0 spegne il monitor degli agenti.",
+      "description": "Token di contesto di un subagent o teammate oltre i quali riceve la nota per scrivere l'handoff. 0 spegne le note di zona agli agenti.",
       "default": 120000
     },
     "agentHardTokens": {
