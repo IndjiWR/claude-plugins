@@ -26,8 +26,11 @@ const stepInput = (agentId?: string) => ({ turnId: 't', index: 0, model: 'm', me
 // agenti e il fondo di turn.step che risponde con l'usage di `state.tokens`.
 const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-purpose', description: 'x', status: 'running' }]) => {
   mock.store(on)
-  mock.clock(on, { now: 1_000_000 })
+  const clock = mock.clock(on, { now: 1_000_000 })
   const state = {
+    clock,
+    commands: [] as string[],
+    toasts: [] as string[],
     tokens: 0 as number | null,
     files: new Map<string, string>(),
     spawns: [] as { subagentType?: string; prompt: string; name?: string; description?: string }[],
@@ -87,6 +90,15 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     state.logs.push((e as unknown as { text: string }).text)
     return { value: undefined }
   })
+  on('command.run', (_, e) => {
+    state.commands.push(e.command)
+    return { text: `/${e.command}` }
+  })
+  on('ui.toast', (_, e) => {
+    state.toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('classic.PostToolUse', () => ({}))
@@ -479,4 +491,93 @@ test('catena di rilanci a1, a2, a3 dello stesso teammate: oltre maxClearsPerHour
   expect(toolsCalled(state)).toEqual([])
   expect(state.files.get('.claude/handoff/pending/s1--a3.md')).toContain('status: validated')
   expect(state.logs.some(line => line.includes('limite di 2 rilanci'))).toBe(true)
+})
+
+// Clear della principale con agenti attivi.
+const MAIN_FILE = '.claude/handoff/pending/s1.md'
+const MAIN_VALIDATED = '---\nstatus: validated\nsession: s1\nrounds: 1\n---\n# Handoff\n\n## Prossimo passo immediato\nFare y.\n'
+const mainDone = (turnId = 'm1') => ({ answer: 'ok', durationMs: 1, isAborted: false, turnId, reason: 'answer' }) as never
+const mainStart = (turnId = 'm1') => ({ text: 'x', turnId }) as never
+const running = () => [{ id: 'a1', type: 'general-purpose', description: 'x', status: 'running' }, validator('v1')]
+const settled = async () => {
+  for (let turn = 0; turn < 5; turn++) await pause()
+}
+
+test('principale con handoff validato e agente running: niente clear, una nota di pausa; poi l agente si ferma e il clear parte', async ($, on) => {
+  const list = running()
+  const state = world(on, list)
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.commands).toEqual([])
+  const [first, ...rest] = (await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []
+  expect(rest.length).toBe(0)
+  expect(first).toContain('la sessione principale riparte')
+  expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
+  Object.assign(list[0] ?? {}, { status: 'idle' })
+  await $.turn.complete(done('a1'))
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  await $.turn.complete(done('a1'))
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})
+
+test('il teammate idle e il validatore della mod non fanno rimandare il clear', async ($, on) => {
+  const state = world(on, [...idleMate(), { id: 'v9', type: 'auto-clear-context:handoff-validator', description: 'v', status: 'running' }])
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})
+
+test('principale in un turno: il turn.complete di un agente non avvia il clear', async ($, on) => {
+  const list = running()
+  const state = world(on, list)
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await $.turn.start(mainStart('m2'))
+  Object.assign(list[0] ?? {}, { status: 'idle' })
+  await $.turn.complete(done('a1'))
+  await settled()
+  expect(state.commands).toEqual([])
+  await $.turn.complete(mainDone('m2'))
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})
+
+test('turn.complete di un agente senza handoff della principale: nessun clear', async ($, on) => {
+  const state = world(on, idleMate())
+  await $.turn.complete(done('a1'))
+  await settled()
+  expect(state.commands).toEqual([])
+})
+
+test('dopo 20 minuti di rinvio un solo avviso, senza forzare il clear', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await $.classic.PostToolUse(agentAfter('a1'))
+  expect(state.toasts).toEqual([])
+  await state.clock.advance(19 * 60_000)
+  await $.classic.PostToolUse(agentAfter('a1'))
+  expect(state.toasts).toEqual([])
+  await state.clock.advance(2 * 60_000)
+  await $.classic.PostToolUse(agentAfter('a1'))
+  await settled()
+  expect(state.toasts.length).toBe(1)
+  expect(state.toasts[0]).toContain('clear rimandato da 21 minuti')
+  expect(state.logs.filter(line => line.includes('clear rimandato da 21 minuti')).length).toBe(1)
+  await $.classic.PostToolUse(agentAfter('a1'))
+  await $.turn.complete(done('a1'))
+  await settled()
+  expect(state.toasts.length).toBe(1)
+  expect(state.commands).toEqual([])
+})
+
+test('opzione agents false: gli agenti non ricevono la nota di pausa', { options: { agents: false } }, async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
 })

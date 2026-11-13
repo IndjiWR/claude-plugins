@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, appendGaps, leadFallback, parseVerdict, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, appendGaps, leadFallback, parseVerdict, pauseNote, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -55,6 +55,7 @@ const RESTARTS_KEY = 'restarts'
 const RESTARTS_KEPT = 20
 const EVENTS_KEPT = 300
 const BUSY = ['pending', 'running', 'waiting']
+const DEFER_WARN_MS = 20 * 60_000
 
 const PANE = 'soglia'
 const PANE_ROWS = 20
@@ -166,6 +167,16 @@ const PENDING_WRITE = { plugin: 'auto-clear-context', key: 'pendingWrite' } as c
 let pendingNote: { session: string; zone: ThresholdZone; text: string } | undefined
 let lastCheckAt = 0
 let isClearRequested = false
+// Clear della principale con agenti attivi: `isMainBusy` è vero finché la principale è in un turno;
+// `isTryingClear` evita che due controlli ravvicinati (principale e agenti) lancino due /clear.
+let isMainBusy = false
+let isTryingClear = false
+// Il rinvio in corso: da quando e per quale handoff (impronta); l'avviso dei 20 minuti esce una volta.
+let deferredSince: number | undefined
+let deferredId: string | undefined
+let isDeferWarned = false
+// Per agente, l'impronta dell'handoff della principale per cui ha già avuto la nota di pausa.
+const pausedFor = new Map<string, string>()
 // Contesto dell'ultimo passo di ogni agente (turn.step) e finestra della principale, su cui se ne calcola la percentuale.
 const agentTokens = new Map<string, number>()
 let mainWindow: number | undefined
@@ -181,6 +192,7 @@ const validating = new Map<string, { agentId: string; path: string; round: numbe
 const doneRounds = new Map<string, number>()
 // Rilancio del teammate: tetto orario (come i clear), rilanci in corso e handoff già passati alla principale.
 let maxRestartsPerHour = 3
+let maxClearsPerHour = 3
 const restarting = new Set<string>()
 const handedToLead = new Set<string>()
 const VALIDATOR = 'auto-clear-context:handoff-validator'
@@ -862,13 +874,94 @@ const concludeValidation = async ($: EngineInterface, validatorId: string, answe
   }
 }
 
+// Gli agenti che trattengono il clear: pending/running/waiting. Un teammate idle, i validatori e gli agenti
+// avviati dalla mod non contano.
+const activeAgents = async ($: EngineInterface) =>
+  (await orElse($.agent.list(), [] as readonly AgentInfo[])).filter(
+    agent => BUSY.includes(agent.status) && !ownAgents.has(agent.id) && agent.type !== VALIDATOR,
+  )
+
+const resetDeferral = () => {
+  deferredSince = undefined
+  deferredId = undefined
+  isDeferWarned = false
+  pausedFor.clear()
+}
+
+// Dopo 20 minuti di rinvio, un avviso una volta sola: il clear non si forza, perché l'effetto di /clear
+// sugli agenti in corso non è garantito dall'API.
+const warnLongDeferral = async ($: EngineInterface) => {
+  if (deferredSince === undefined || isDeferWarned) return
+  const elapsed = (await $.clock.now()) - deferredSince
+  if (elapsed < DEFER_WARN_MS) return
+  isDeferWarned = true
+  const names = (await activeAgents($)).map(agent => `${agent.description} (${short(agent.id)})`).join(', ')
+  const text = `clear rimandato da ${Math.floor(elapsed / 60_000)} minuti: agenti attivi ${names === '' ? 'nessuno' : names}`
+  $.ui.toast(`auto-clear-context: ${text}`)
+  log($, text)
+}
+
+// La nota di pausa per un agente attivo, una volta per handoff della principale in attesa del clear.
+const pauseContext = async ($: EngineInterface, agentId: string): Promise<string | undefined> => {
+  if (!agentsEnabled || deferredId === undefined || ownAgents.has(agentId)) return undefined
+  await warnLongDeferral($)
+  if (pausedFor.get(agentId) === deferredId) return undefined
+  pausedFor.set(agentId, deferredId)
+  log($, `agente ${short(agentId)}: nota di pausa, la principale riparte con /clear`)
+  return pauseNote()
+}
+
+// Il clear della principale, se l'handoff è validato e nessun agente è attivo. Si ricontrolla a ogni fine turno
+// della principale e di un agente (reason dice da chi arriva).
+const tryClear = async ($: EngineInterface, reason: string) => {
+  if (isClearRequested || isTryingClear) return
+  isTryingClear = true
+  try {
+    const session = await $.session.id()
+    const handoff = await readOwnHandoff($, session)
+    if (handoff?.status !== 'validated') {
+      resetDeferral()
+      return
+    }
+    const now = await $.clock.now()
+    const clears = ((await $.store.get(CLEARS_KEY)) as ClearRecord[] | undefined) ?? []
+    if (clears.some(clear => clear.handoff === handoff.id)) {
+      log($, `l'handoff ${handoff.id} ha già avuto il suo clear: nessun nuovo clear`)
+      return
+    }
+    if (clears.filter(clear => now - clear.at < HOUR_MS).length >= maxClearsPerHour) {
+      log($, `limite di ${maxClearsPerHour} clear in un'ora raggiunto: l'handoff ${handoff.id} resta in attesa`)
+      return
+    }
+    const busy = await activeAgents($)
+    if (busy.length > 0) {
+      if (deferredId !== handoff.id) {
+        resetDeferral()
+        deferredId = handoff.id
+        deferredSince = now
+        log($, `handoff ${handoff.id} validato, ma ${busy.length} agenti ancora attivi: clear rimandato a quando si fermano (${reason})`)
+      }
+      await warnLongDeferral($)
+      return
+    }
+
+    resetDeferral()
+    await $.store.set(CLEARS_KEY, [...clears, { at: now, handoff: handoff.id }].slice(-CLEARS_KEPT))
+    isClearRequested = true
+    log($, `handoff ${handoff.id} della sessione ${short(session)} validato: eseguo /clear (${reason})`)
+    runClear($, true)
+  } finally {
+    isTryingClear = false
+  }
+}
+
 export const register: Register = (on, options) => {
   // Le soglie di /config; quelle in vigore le dà readSettings a ogni controllo.
   const configured: Pair = {
     threshold: Number(options.threshold ?? DEFAULTS.threshold),
     hardThreshold: Number(options.hardThreshold ?? DEFAULTS.hardThreshold),
   }
-  const maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
+  maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
   maxRestartsPerHour = maxClearsPerHour
   agentsEnabled = options.agents !== false
   const agentThreshold = Number(options.agentThreshold ?? 0)
@@ -894,8 +987,10 @@ export const register: Register = (on, options) => {
   on('classic.PostToolUse', async ($, e, next) => {
     const result = await next(e)
     if (e.agent_id !== undefined) {
-      const note = await agentZoneContext($, e.agent_id, configured, agentThreshold)
-      return note === undefined ? result : { ...result, additionalContext: [...(result.additionalContext ?? []), note] }
+      const notes = [await agentZoneContext($, e.agent_id, configured, agentThreshold), await pauseContext($, e.agent_id)].filter(
+        (note): note is string => note !== undefined,
+      )
+      return notes.length === 0 ? result : { ...result, additionalContext: [...(result.additionalContext ?? []), ...notes] }
     }
     const now = await $.clock.now()
     if (now - lastCheckAt < CHECK_EVERY_MS) return result
@@ -956,8 +1051,15 @@ export const register: Register = (on, options) => {
     return next({ ...e, context: [...(e.context ?? []), note.text] })
   }).catch(($, e, next) => next(e))
 
+  // La principale in un turno: il clear aspetta la sua fine turno, anche se un agente si ferma prima.
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) isMainBusy = true
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    if (e.agentId === undefined) isMainBusy = false
     if (e.agentId !== undefined) {
       const agentId = e.agentId
       if (e.isAborted) {
@@ -968,37 +1070,16 @@ export const register: Register = (on, options) => {
           checking.delete(job.agentId)
           log($, `validatore ${short(agentId)} annullato: l'handoff del teammate ${short(job.agentId)} sarà validato al suo prossimo turno`)
         }
-        return result
+      } else {
+        const run = validating.has(agentId) ? concludeValidation($, agentId, e.answer) : checkTeammate($, agentId)
+        await run.catch((error: unknown) => log($, `agente ${short(agentId)}: validazione non riuscita: ${errorText(error)}`))
       }
-      const run = validating.has(agentId) ? concludeValidation($, agentId, e.answer) : checkTeammate($, agentId)
-      await run.catch((error: unknown) => log($, `agente ${short(agentId)}: validazione non riuscita: ${errorText(error)}`))
+      // Un agente che si ferma può liberare il clear della principale, se questa è ferma.
+      if (!isMainBusy) await tryClear($, `agente ${short(agentId)} fermo`).catch((error: unknown) => log($, `clear non controllato: ${errorText(error)}`))
       return result
     }
     if (e.isAborted || isClearRequested) return result
-    const session = await $.session.id()
-    const handoff = await readOwnHandoff($, session)
-    if (handoff?.status !== 'validated') return result
-
-    const now = await $.clock.now()
-    const clears = ((await $.store.get(CLEARS_KEY)) as ClearRecord[] | undefined) ?? []
-    if (clears.some(clear => clear.handoff === handoff.id)) {
-      log($, `l'handoff ${handoff.id} ha già avuto il suo clear: nessun nuovo clear`)
-      return result
-    }
-    if (clears.filter(clear => now - clear.at < HOUR_MS).length >= maxClearsPerHour) {
-      log($, `limite di ${maxClearsPerHour} clear in un'ora raggiunto: l'handoff ${handoff.id} resta in attesa`)
-      return result
-    }
-    const busy = (await orElse($.agent.list(), [])).filter(agent => BUSY.includes(agent.status))
-    if (busy.length > 0) {
-      log($, `handoff ${handoff.id} validato, ma ${busy.length} subagent ancora attivi: clear rimandato al prossimo fine turno`)
-      return result
-    }
-
-    await $.store.set(CLEARS_KEY, [...clears, { at: now, handoff: handoff.id }].slice(-CLEARS_KEPT))
-    isClearRequested = true
-    log($, `handoff ${handoff.id} della sessione ${short(session)} validato: eseguo /clear`)
-    runClear($, true)
+    await tryClear($, 'fine turno della principale')
     return result
   })
 
@@ -1007,6 +1088,7 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear' && isClearRequested) {
       isClearRequested = false
       pendingNote = undefined
+      resetDeferral()
       log($, 'clear eseguito: invio il prompt di ripresa')
       $.prompt.submit({ text: RESUME }).then(
         submitted => {
