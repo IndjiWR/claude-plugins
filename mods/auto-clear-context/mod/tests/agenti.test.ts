@@ -33,6 +33,7 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     spawns: [] as { subagentType?: string; prompt: string }[],
     // Se impostato, la risposta del fondo di tool.call di Agent (un teammate avviato dal modello).
     agentRecord: undefined as object | undefined,
+    agentCalls: 0,
     sends: [] as { to: unknown; text: string }[],
   }
   on('session.id', () => ({ value: 's1' }))
@@ -57,7 +58,10 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     return { model: 'm' }
   })
   // Il fondo di tool.call di Agent: la risposta di un teammate avviato dal modello, se impostata.
-  on('tool.call', () => ({ result: state.agentRecord, text: 'ok' }) as never)
+  on('tool.call', () => {
+    state.agentCalls++
+    return { result: state.agentRecord, text: 'ok' } as never
+  })
   on('session.send', (_, e) => {
     state.sends.push({ to: e.to, text: e.text })
     return { isDelivered: true } as never
@@ -240,4 +244,29 @@ test('il validatore non riceve note di zona: sta in ownAgents', async ($, on) =>
   state.files.set(FILE, ready())
   await turnEnd($, 'a1')
   expect((await step($, state, 450_000, 'v1')).length).toBe(0)
+})
+
+test('validatore annullato: il turno successivo del teammate rilancia la validazione, stesso giro', async ($, on) => {
+  const state = world(on, teammate)
+  state.files.set(FILE, ready())
+  await turnEnd($, 'a1')
+  expect(state.spawns.length).toBe(1)
+  await $.turn.complete({ ...(done('v1') as object), isAborted: true, reason: 'aborted' } as never)
+  expect(state.files.get(FILE)).toContain('status: ready')
+  await turnEnd($, 'a1')
+  expect(state.spawns.length).toBe(2)
+  await turnEnd($, 'v2', 'LACUNE: nessuna\nVERDETTO: completo')
+  expect(state.files.get(FILE)).toContain('status: validated')
+  expect(state.files.get(FILE)).toContain('rounds: 1')
+})
+
+test('tool.call di Agent: se $.state.set lancia, il risultato passa e il teammate non è lanciato due volte', async ($, on) => {
+  const state = world(on)
+  state.agentRecord = { status: 'teammate_spawned', agentId: 'a1', agent_id: 'a1', teammate_id: 'pose@t', name: 'pose', prompt: 'x' }
+  on('state.set', () => {
+    throw new Error('stato non scrivibile')
+  })
+  const result = await $.tool.call({ tool: 'Agent', name: 'pose', description: 'posa', prompt: 'x' } as never)
+  expect(result.deny).toBeUndefined()
+  expect(state.agentCalls).toBe(1)
 })

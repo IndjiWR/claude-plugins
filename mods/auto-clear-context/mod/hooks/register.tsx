@@ -837,7 +837,12 @@ export const register: Register = (on, options) => {
     if (e.subagent_type !== undefined) input.subagent_type = e.subagent_type
     if (e.model !== undefined) input.model = e.model
     if (e.effort !== undefined) input.effort = e.effort
-    await $.state.set({ ...AGENT_INPUTS, id: agentId }, input)
+    // Il teammate è già partito: un errore qui non deve far richiamare next dal catch (lancio doppio).
+    try {
+      await $.state.set({ ...AGENT_INPUTS, id: agentId }, input)
+    } catch (error) {
+      log($, `input del teammate ${short(agentId)} non registrato: ${errorText(error)}`)
+    }
     return result
   }).catch(($, e, next) => next(e))
 
@@ -854,8 +859,17 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId !== undefined) {
-      if (e.isAborted) return result
       const agentId = e.agentId
+      if (e.isAborted) {
+        // Validatore annullato: si libera il teammate, il suo prossimo turno rilancia lo stesso giro.
+        const job = validating.get(agentId)
+        if (job !== undefined) {
+          validating.delete(agentId)
+          checking.delete(job.agentId)
+          log($, `validatore ${short(agentId)} annullato: l'handoff del teammate ${short(job.agentId)} sarà validato al suo prossimo turno`)
+        }
+        return result
+      }
       const run = validating.has(agentId) ? concludeValidation($, agentId, e.answer) : checkTeammate($, agentId)
       await run.catch((error: unknown) => log($, `agente ${short(agentId)}: validazione non riuscita: ${errorText(error)}`))
       return result
