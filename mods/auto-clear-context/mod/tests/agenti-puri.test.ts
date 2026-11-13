@@ -73,3 +73,13 @@ test('agentResume e leadFallback', () => {
   expect(fb).toContain('worker')
   expect(fb).toContain(`Riprendi dall'handoff ${path}`)
 })
+
+test("agentZoneNote: commit dei propri file prima dell'handoff", () => {
+  for (const kind of ['teammate', 'subagent'] as const) {
+    const note = agentZoneNote(kind, 1, 130_000, main, path, 'general-purpose')
+    expect(note).toContain('git add <file>')
+    expect(note).toContain('mai git add -A')
+    expect(note).toContain('non committati')
+  }
+  expect(agentZoneNote('teammate', 1, 130_000, main, path, 'x')).toContain(`HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo`)
+})

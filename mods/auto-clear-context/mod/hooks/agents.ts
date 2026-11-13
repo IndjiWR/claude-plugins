@@ -40,6 +40,10 @@ export const agentHandoffPath = (session: string, agentId: string) => `${HANDOFF
 // L'id dell'agente è la parte del nome file dopo "--".
 const agentIdOf = (path: string) => /--([^/]+)\.md$/.exec(path)?.[1] ?? ''
 
+// Passo fisso: l'agente committa i propri file prima di scrivere l'handoff.
+export const COMMIT_STEP =
+  "Prima di scrivere l'handoff committa i file che hai modificato tu, per nome (git add <file>…; mai git add -A né git add .; mai i file di .claude/handoff/), con un messaggio che dica il punto raggiunto. Se non puoi (test rossi, file in comune con altri, permesso negato, niente repo git), elenca nell'handoff, in «File toccati», i file non committati e il motivo."
+
 const levels = (limits: Limits) => `${formatK(limits.soft)}/${formatK(limits.hard)}, margine di sicurezza a ${formatK(limits.margin)}`
 
 // La nota che la mod allega a un agente quando il suo contesto entra in una zona.
@@ -55,14 +59,16 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, 
     return [
       `${seen}.`,
       when,
+      COMMIT_STEP,
       `Scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff (stato, decisioni, file toccati, prossimo passo, «Verifica alla ripresa»), con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`,
-      'Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con una sola riga.',
+      `Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con la sola riga «HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo».`,
       'La mod ferma questo teammate e lo rilancia con lo stesso nome, tipo e modello, dandogli l\'handoff come prompt.',
     ].join(' ')
   }
   return [
     `${seen}.`,
     when,
+    COMMIT_STEP,
     'Se il compito si chiude in pochi passi, finiscilo e rispondi come al solito.',
     `Altrimenti scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff, con status: ready e agent: ${agentIdOf(path)} nel frontmatter, e controllalo da solo sui punti del validatore (ripartire dal solo file: obiettivo, decisioni, file, prossimo passo, verifica alla ripresa, nessun riferimento alla conversazione).`,
     `La risposta finale è una sola riga per chi ti ha lanciato: HANDOFF ${path}: rilancia un subagent ${type} con prompt «Riprendi dall'handoff ${path}».`,
