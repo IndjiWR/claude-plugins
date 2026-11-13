@@ -45,6 +45,15 @@ In order: the soft zone is reached at 41% and the note goes out with the next pr
 
 In the project the mod uses `.claude/handoff/`: `pending/` (one handoff per session), `archive/` and `events.log`.
 
+### Subagents and teammates
+
+With `agents` on (default), the context of subagents and teammates is monitored too, with the same zones (`agentThreshold` moves the soft one; hard and margin keep the main session's distance). In a zone the agent gets a note and writes its own handoff, `.claude/handoff/pending/<session id>--<agent id>.md`, with `status: ready` and `agent: <id>`. The mod looks the file up by agent id, so it still finds it after a `/clear` of the main session.
+
+- **Teammates**: the mod runs the validator, stops the teammate and relaunches it with `$.agent.spawn` (same name, description, type and model) with the handoff as prompt. The host rejects the Agent tool when a plugin calls it, hence the spawn. If `TaskStop` or the spawn is denied, or the relaunched agent is not in the team (no `teammateId`), the mod asks the main session to stop and relaunch.
+- **Subagents**: not validated by the mod. The agent checks the file itself and its final answer is `HANDOFF <path>: relaunch …`; whoever launched it relaunches.
+- **Main session**: its `/clear` is rechecked at each agent's `turn.complete`. Idle teammates, the mod's validators and the mod's own agents do not hold it back; active agents get a pause note. After 20 minutes of waiting there is only a warning, never a forced clear.
+- Relaunches have their own counter, per teammate name, with the same cap as clears (`maxClearsPerHour` per rolling hour); they do not use up the main session's clears.
+
 ### Several sessions in one folder
 
 Each session writes its handoff to its own file, `.claude/handoff/pending/<session id>.md`, with `session: <session id>` in the frontmatter. The skill gets the id from `${CLAUDE_SESSION_ID}`, and the zone note names the same path. At the end of a turn the mod looks only at the current session's handoff, so a session never clears because another one validated its own. After a `/clear` it attaches only the handoff of the session that the clear closed. Two sessions can hand off at the same time without overwriting each other.
@@ -81,6 +90,8 @@ Update with `claude plugin update auto-clear-context`.
 | --- | --- | --- | --- |
 | `threshold` | 40 | 0, or 1–85 and at least 10 below hard | soft zone (%); `0` turns the monitor off |
 | `hardThreshold` | 60 | soft + 10 to 95 | hard zone (%) |
+| `agents` | on | — | monitor subagents and teammates too |
+| `agentThreshold` | 0 | — | soft zone (%) for agents; `0` = same as the main session |
 | `maxClearsPerHour` | 3 | — | automatic clears per rolling hour, counted across all sessions; `0` disables them; above 20 means no cap (the mod keeps only the last 20 clears) |
 
 The safety margin is always hard + 15, capped at 95%. Only `/soglia` checks the ranges above: values set in `/config` or at install are taken as given, except that the hard threshold in force is raised to at least soft + 10 and capped at 95.
@@ -104,7 +115,7 @@ Claude can read the current usage and zone with the mod's `context_usage` tool, 
 - **Only a handoff marked validated clears.** The mod runs `/clear` only when the frontmatter of the session's handoff says `status: validated`, which the skill sets after up to 2 rounds with the read-only validator. A draft never triggers a clear. The mod trusts that flag: it reads only the frontmatter, so a file marked validated by hand clears too.
 - **Only for the session that wrote it.** The clear runs only in the session that wrote the handoff, and only the fresh session that follows that clear gets the handoff attached. A validated file in a session's slot whose frontmatter carries another session's id is skipped and logged.
 - **One clear per handoff**, and at most `maxClearsPerHour` (default 3) per rolling hour; past that the handoff waits. The count is kept in the mod's store, so it is shared by all sessions on the machine.
-- **Never with work in flight.** No clear while a subagent is pending, running or waiting, after an interrupted turn, or at the end of a subagent's turn. In every zone the skill makes Claude wait for or stop background work first. In the soft and hard zones the skill and the zone notes also rule out handing off mid-edit, mid-debug or with a question to the user pending; whatever is left unfinished in the hard zone or the safety margin goes into the handoff's interrupted-work section.
+- **Never with work in flight.** No clear after an interrupted turn, while the main session is in a turn, or while an agent is pending, running or waiting. The clear is rechecked when an agent ends its turn: that agent counts as stopped; idle teammates, the mod's validators and the agents it started do not hold the clear back. In every zone the skill makes Claude wait for or stop background work first. In the soft and hard zones the skill and the zone notes also rule out handing off mid-edit, mid-debug or with a question to the user pending; whatever is left unfinished in the hard zone or the safety margin goes into the handoff's interrupted-work section.
 - **Bounded retry.** If `/clear` fails the mod retries once after 300 ms, then gives up and logs why. That handoff then counts as used: change it and validate it again to get a new clear.
 - **Everything is visible.** Every step shows up in the transcript (`auto-clear-context: …` lines) and in `.claude/handoff/events.log` (last 300 events).
 - **Kept out of git.** When the project root has a `.git` directory, the mod adds `.claude/handoff/` to `.git/info/exclude`, which is local and never committed. The skill also tells Claude to keep handoffs under 9,000 characters and free of secrets; the mod does not check either.
@@ -115,6 +126,8 @@ Claude can read the current usage and zone with the mod's `context_usage` tool, 
 - The mod cannot see background commands (Bash, monitors); the skill makes Claude wait for them or stop them before the handoff.
 - The git exclude is skipped in worktrees and submodules, where `.git` is a file.
 - The mods API cannot delete files: after the resume a session's file in `.claude/handoff/pending/` stays behind empty (an empty file means nothing pending). Empty files and drafts left by closed sessions pile up there and can be deleted by hand.
+- No `/clear` inside an agent: it is relaunched with a clean context, and a relaunched teammate loses its original `effort`.
+- Agents use the main session's context window, so they share its zones; teammates in a separate pane are not monitored.
 - Claude Code only (terminal and the desktop Code tab); it does not run in claude.ai chats.
 - Organization policies can block personal mods: if `/status` shows "Enterprise managed settings", ask your admin.
 
@@ -211,10 +224,19 @@ Dopo l'aggiornamento riavvia le sessioni aperte: finché usano la versione vecch
 Sicurezze:
 - `/clear` solo nella sessione che ha scritto l'handoff, e l'handoff va solo alla sessione pulita che la segue;
 - un solo clear per handoff, al massimo 3 clear all'ora contati su tutte le sessioni (opzione `maxClearsPerHour`);
-- nessun clear con subagent ancora attivi;
+- nessun clear con la principale in un turno o con agenti ancora attivi (pending, running, waiting); si ricontrolla quando un agente finisce il turno, e quell'agente conta come fermo; teammate `idle`, validatori e agenti avviati dalla mod non lo trattengono;
 - ogni passaggio compare nel transcript (righe `auto-clear-context: …`) e in `.claude/handoff/events.log`.
 
 Nel progetto la mod usa la cartella `.claude/handoff/`, con `pending/` (un handoff per sessione), `archive/` ed `events.log`. Se la root del progetto ha una cartella `.git`, la aggiunge da sola a `.git/info/exclude`, così non finisce in un commit.
+
+### Subagent e teammate
+
+Con `agents` attivo (default) la mod monitora anche il contesto di subagent e teammate, con le stesse zone (`agentThreshold`, default 0 = come la principale, sposta la morbida; dura e margine mantengono la distanza della principale). In zona l'agente riceve una nota e scrive il suo handoff, `.claude/handoff/pending/<id sessione>--<id agente>.md`, con `status: ready` e `agent: <id>`. La mod cerca il file per id dell'agente, quindi lo trova anche dopo un `/clear` della principale.
+
+- **Teammate**: la mod lancia il validatore, ferma il teammate e lo rilancia con `$.agent.spawn` (stesso nome, descrizione, tipo e modello) con l'handoff come prompt. L'host rifiuta il tool Agent chiamato da un plugin, da qui lo spawn. Se `TaskStop` o lo spawn vengono negati, o il rilanciato non è nel team (nessun `teammateId`), la mod chiede alla sessione principale di fare stop e rilancio.
+- **Subagent**: la mod non li valida. L'agente controlla il file da solo e risponde `HANDOFF <percorso>: rilancia …`; lo rilancia chi lo ha lanciato.
+- **Sessione principale**: il suo `/clear` si ricontrolla al `turn.complete` di ogni agente. Teammate `idle`, validatori e agenti della mod non lo bloccano; gli agenti attivi ricevono una nota di pausa. Dopo 20 minuti di rinvio c'è solo un avviso, mai un clear forzato.
+- I rilanci hanno un contatore loro, per nome del teammate, con lo stesso tetto dei clear (`maxClearsPerHour` in un'ora); non consumano i clear della principale.
 
 ### Requisiti
 
@@ -275,6 +297,8 @@ Il plugin viene letto da quella cartella: non spostarla e non cancellarla.
 
 - Il pulsante "Ripristina /config" del pannello `/soglia` non funziona ancora: imposta il valore con `/soglia N`.
 - I comandi in background (Bash, monitor) la mod non li vede: la skill fa aspettare o fermare Claude prima dell'handoff.
+- Nessun `/clear` dentro un agente: viene rilanciato a contesto pulito, e il teammate rilanciato perde l'`effort` originale.
+- Gli agenti usano la finestra della sessione principale; i teammate in un pannello separato sono esclusi.
 - Nei worktree e nei submodule, dove `.git` è un file, l'esclusione da git non viene aggiunta.
 - L'API delle mod non cancella file: dopo la ripresa il file della sessione in `.claude/handoff/pending/` resta vuoto (vuoto vuol dire nessun handoff in attesa). I file vuoti e le bozze delle sessioni chiuse si accumulano lì e si possono cancellare a mano.
 

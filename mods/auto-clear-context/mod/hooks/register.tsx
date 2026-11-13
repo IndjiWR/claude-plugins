@@ -1,7 +1,9 @@
 import { atom, read, update } from 'claude-code'
-import type { ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
+import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
 
-import type { ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, appendGaps, leadFallback, parseVerdict, pauseNote, setFront } from './agents'
+import type { AgentKind } from './agents'
+import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
 // Vicino alle soglie di contesto Claude salva lo stato in un handoff validato
 // (skill auto-clear-context:handoff); a fine turno la mod esegue /clear e, nella
@@ -31,9 +33,11 @@ import type { ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } f
 // Dove /config non ha le righe (sessioni headless, tab Code dell'app) le salva la
 // mod in $.store. Il monitor legge le soglie in vigore a ogni controllo.
 
-// `session` è l'id nel frontmatter, se c'è; `path` il file da cui viene.
-type Handoff = { text: string; status: string; session: string | undefined; id: string; path: string }
+// `session` e `agent` sono i campi del frontmatter, se ci sono; `path` il file da cui viene.
+type Handoff = { text: string; status: string; session: string | undefined; agent: string | undefined; id: string; path: string }
 type ClearRecord = { at: number; handoff: string }
+// `agent` è la chiave stabile del teammate (nome, teammateId o id), non l'id: cambia a ogni rilancio.
+type RestartRecord = { at: number; agent: string; handoff: string }
 type Field = ThresholdField
 type Pair = Record<Field, number>
 type Limits = { soft: number; hard: number; margin: number }
@@ -47,8 +51,11 @@ const HOUR_MS = 3_600_000
 const RETRY_MS = 300
 const CLEARS_KEY = 'clears'
 const CLEARS_KEPT = 20
+const RESTARTS_KEY = 'restarts'
+const RESTARTS_KEPT = 20
 const EVENTS_KEPT = 300
 const BUSY = ['pending', 'running', 'waiting']
+const DEFER_WARN_MS = 20 * 60_000
 
 const PANE = 'soglia'
 const PANE_ROWS = 20
@@ -160,6 +167,38 @@ const PENDING_WRITE = { plugin: 'auto-clear-context', key: 'pendingWrite' } as c
 let pendingNote: { session: string; zone: ThresholdZone; text: string } | undefined
 let lastCheckAt = 0
 let isClearRequested = false
+// Clear della principale con agenti attivi: `isMainBusy` è vero finché la principale è in un turno;
+// `isTryingClear` evita che due controlli ravvicinati (principale e agenti) lancino due /clear.
+let isMainBusy = false
+let isTryingClear = false
+// Il rinvio in corso: da quando e per quale handoff (impronta); l'avviso dei 20 minuti esce una volta.
+let deferredSince: number | undefined
+let deferredId: string | undefined
+let isDeferWarned = false
+// Per agente, l'impronta dell'handoff della principale per cui ha già avuto la nota di pausa.
+const pausedFor = new Map<string, string>()
+// Contesto dell'ultimo passo di ogni agente (turn.step) e finestra della principale, su cui se ne calcola la percentuale.
+const agentTokens = new Map<string, number>()
+let mainWindow: number | undefined
+// Il percorso dell'handoff dato a ogni agente con la prima nota: resta quello anche dopo un /clear della principale.
+const agentPaths = new Map<string, string>()
+// Gli agenti avviati dalla mod (validatori, teammate rilanciati): niente note di zona.
+const ownAgents = new Set<string>()
+let agentsEnabled = true
+// Validazione dell'handoff di un teammate: `checking` tiene gli agenti con un controllo in corso
+// (preso in modo sincrono, perché due turn.complete ravvicinati non lancino due validatori);
+// `validating` ricorda per ogni validatore lanciato di chi è, il file e il giro.
+const checking = new Set<string>()
+const validating = new Map<string, { agentId: string; path: string; round: number }>()
+// I giri già fatti per teammate: se il teammate riscrive il file senza `rounds`, il conto non riparte da 0.
+const doneRounds = new Map<string, number>()
+// Rilancio del teammate: tetto orario (come i clear), rilanci in corso e handoff già passati alla principale.
+let maxRestartsPerHour = 3
+let maxClearsPerHour = 3
+const restarting = new Set<string>()
+const handedToLead = new Set<string>()
+const VALIDATOR = 'auto-clear-context:handoff-validator'
+const AGENT_INPUTS = { plugin: 'auto-clear-context', key: 'agentInputs' } as const
 // La sessione che l'ultimo /clear ha chiuso: SessionStart (clear) allega il suo
 // handoff, perché la sessione nuova ha già un altro id.
 let clearedSession: string | undefined
@@ -246,37 +285,46 @@ const readHandoff = async ($: EngineInterface, path: string): Promise<Handoff | 
   if (text.trim() === '') return undefined
   const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? ''
   const status = frontField(front, 'status') ?? 'draft'
-  return { text, status, session: frontField(front, 'session'), id: fingerprint(text), path }
+  return { text, status, session: frontField(front, 'session'), agent: frontField(front, 'agent'), id: fingerprint(text), path }
 }
 
 // L'handoff di una sessione: il suo file in pending/ (se il frontmatter non
 // porta l'id di un'altra), altrimenti il pending.md condiviso delle versioni
 // precedenti se porta il suo id. Un pending.md senza id non è di nessuna
-// sessione: resta dov'è e il log lo dice una volta.
+// sessione: resta dov'è e il log lo dice una volta. Un file con `agent:` nel
+// frontmatter è l'handoff di un agente: non fa mai il /clear della principale.
 const readOwnHandoff = async ($: EngineInterface, session: string): Promise<Handoff | undefined> => {
   const { root, shared } = await paths($)
   const own = await readHandoff($, `${root}/${handoffPath(session)}`)
-  if (own !== undefined && (own.session === undefined || own.session === session)) return own
+  const isAgents = own?.agent !== undefined
+  if (own !== undefined && !isAgents && (own.session === undefined || own.session === session)) return own
   if (own?.status === 'validated') {
-    reportOnce($, own, `${handoffPath(session)} porta la sessione ${own.session}: non è di questa sessione, nessun /clear`)
+    const whose = isAgents ? `agent: ${own.agent}: è l'handoff di un agente` : `la sessione ${own.session}: non è di questa sessione`
+    reportOnce($, own, `${handoffPath(session)} porta ${whose}, nessun /clear`)
   }
   const old = await readHandoff($, shared)
-  if (old?.session === session) return old
+  if (old?.session === session && old.agent === undefined) return old
   if (old?.status === 'validated' && old.session === undefined) {
     reportOnce($, old, `${HANDOFF_DIR}/pending.md validato senza session nel frontmatter: non è di nessuna sessione, nessun /clear né ripresa (si riprende a mano)`)
   }
   return undefined
 }
 
-// $.fs non cancella: l'handoff si copia in archive/ e il suo file resta vuoto.
-const archive = async ($: EngineInterface, handoff: Handoff) => {
+// Copia l'handoff in archive/ lasciando intatto il suo file.
+const archiveCopy = async ($: EngineInterface, handoff: Handoff) => {
   await ensureExcluded($)
   const { archive: dir } = await paths($)
   const stamp = new Date(await $.clock.now()).toISOString().replace(/[:.]/g, '-')
   const name = `${stamp}-${handoff.id}.md`
   await $.fs.write(`${dir}/${name}`, handoff.text)
-  await $.fs.write(handoff.path, '')
   return `${HANDOFF_DIR}/archive/${name}`
+}
+
+// $.fs non cancella: l'handoff si copia in archive/ e il suo file resta vuoto.
+const archive = async ($: EngineInterface, handoff: Handoff) => {
+  const archived = await archiveCopy($, handoff)
+  await $.fs.write(handoff.path, '')
+  return archived
 }
 
 const runClear = ($: EngineInterface, canRetry: boolean) => {
@@ -415,6 +463,11 @@ const readAutoCompact = async ($: EngineInterface) => {
 
 const buildNote = async ($: EngineInterface, zone: ThresholdZone, percent: number, limits: Limits, session: string) =>
   zoneNote(zone, percent, limits, zone === 3 ? await readAutoCompact($) : AUTO_COMPACT_PERCENT, session)
+
+const findAgent = async ($: EngineInterface, agentId: string): Promise<AgentInfo | undefined> =>
+  (await orElse($.agent.list(), [] as readonly AgentInfo[])).find(agent => agent.id === agentId)
+
+const kindOf = (info: AgentInfo): AgentKind => (info.teammateId === undefined ? 'subagent' : 'teammate')
 
 const readSignaled = async ($: EngineInterface, session: string) =>
   (await orElse(read($, { ...SIGNALED, id: session }), undefined)) ?? 0
@@ -636,18 +689,344 @@ const describeOverrides = (settings: Settings, window: number | undefined) => {
   return `${field === 'threshold' ? 'Morbida' : 'Dura'} salvata dalla mod; in /config resta ${describeThreshold(settings.inConfig[field], window)}`
 }
 
+// Il percorso relativo alla root di un file sotto .claude/handoff/.
+const relativePath = (path: string) => {
+  const slashed = path.replace(/\\/g, '/')
+  const at = slashed.lastIndexOf(`${HANDOFF_DIR}/`)
+  return at < 0 ? path : slashed.slice(at)
+}
+
+// L'handoff di un agente si cerca per id (pending/*--<agentId>.md, il più recente non vuoto), non con l'id
+// della principale, che cambia a ogni /clear.
+const findAgentHandoff = async ($: EngineInterface, agentId: string): Promise<Handoff | undefined> => {
+  const { root } = await paths($)
+  const dir = `${root}/${HANDOFF_DIR}/pending`
+  const entries = await orElse($.fs.list(dir), [])
+  const [newest] = entries
+    .filter(entry => entry.kind === 'file' && entry.size > 0 && entry.name.endsWith(`--${agentId}.md`))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  return newest === undefined ? undefined : readHandoff($, `${dir}/${newest.name}`)
+}
+
+// La nota di zona per un agente, una volta per zona: il suo handoff lo scrive lui.
+const agentZoneContext = async ($: EngineInterface, agentId: string, configured: Pair, agentThreshold: number): Promise<string | undefined> => {
+  const tokens = agentTokens.get(agentId)
+  if (!agentsEnabled || tokens === undefined || ownAgents.has(agentId)) return undefined
+  const limits = agentLimits(await effectiveLimits($, configured), agentThreshold)
+  if (limits.soft <= 0) return undefined
+  if (!(mainWindow !== undefined && mainWindow > 0)) {
+    const window = (await $.session.usage()).context.window
+    if (!(window > 0)) return undefined
+    mainWindow = window
+  }
+  const percent = Math.round((tokens * 100) / mainWindow)
+  const zone = zoneOf(percent, limits)
+  if (zone === 0) return undefined
+  const info = await findAgent($, agentId)
+  if (info === undefined) return undefined
+  // Chiave e percorso per agente, non per sessione: la principale cambia id a ogni /clear.
+  if (!(await markSignaled($, `agent:${agentId}`, zone))) return undefined
+  const path = agentPaths.get(agentId) ?? agentHandoffPath(await $.session.id(), agentId)
+  agentPaths.set(agentId, path)
+  log($, `agente ${short(agentId)} al ${percent}% (${ZONE_NAMES[zone]}): nota di handoff`)
+  return agentZoneNote(kindOf(info), zone, percent, limits, path, info.type)
+}
+
+// Un tool chiamato dalla mod che non è andato a buon fine: il motivo, altrimenti niente.
+const refusalOf = (outcome: { deny?: string; isError?: boolean; text?: string }) =>
+  outcome.deny ?? (outcome.isError === true ? (outcome.text ?? 'errore del tool') : undefined)
+
+// Riserva: stop o rilancio non riusciti, le istruzioni vanno alla principale (una sola volta per handoff).
+const handToLead = async ($: EngineInterface, agentId: string, name: string, handoff: Handoff, reason: string) => {
+  handedToLead.add(handoff.id)
+  log($, `teammate ${short(agentId)}: rilancio non riuscito (${reason}); istruzioni alla sessione principale, l'handoff resta in pending/`)
+  const text = leadFallback(name, relativePath(handoff.path), reason)
+  $.prompt.submit({ text }).then(
+    submitted => {
+      if (submitted.drop !== undefined) log($, `istruzioni di rilancio alla principale scartate: ${submitted.drop}`)
+    },
+    error => log($, `istruzioni di rilancio alla principale rifiutate: ${errorText(error)}`),
+  )
+}
+
+// Il rilanciato è un teammate se lo spawn dà il teammateId; altrimenti si guarda la lista: per id, o per nome
+// se il motore non ha dato l'id (il vecchio teammate, fermato, è escluso).
+const isRestartedTeammate = async ($: EngineInterface, spawned: { agentId?: string; teammateId?: string }, name: string, oldId: string) => {
+  if (spawned.teammateId !== undefined) return true
+  const list = await orElse($.agent.list(), [] as readonly AgentInfo[])
+  return list.some(
+    agent =>
+      agent.id !== oldId &&
+      agent.teammateId !== undefined &&
+      (spawned.agentId === undefined ? (agent.name ?? agent.teammateId.split('@')[0]) === name : agent.id === spawned.agentId),
+  )
+}
+
+// Il teammate fermato non ha più bisogno delle mappe per agente.
+const forgetAgent = (agentId: string) => {
+  agentTokens.delete(agentId)
+  doneRounds.delete(agentId)
+  checking.delete(agentId)
+  agentPaths.delete(agentId)
+}
+
+// Rilancio del teammate con l'handoff validato: TaskStop, poi $.agent.spawn con l'input originale dell'Agent
+// (o i dati della lista, se non è registrato). Il teammate nuovo non è in ownAgents: torna sotto il monitor.
+// `isEnding`: chiamato dal turn.complete del teammate stesso, che sta finendo il turno: è fermo qualunque
+// stato mostri la lista. Da un altro evento (fine del validatore) conta lo stato in lista.
+const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handoff, isEnding = false) => {
+  if (!agentsEnabled || restarting.has(agentId) || handedToLead.has(handoff.id)) return
+  restarting.add(agentId)
+  try {
+    const info = await findAgent($, agentId)
+    if (info === undefined) {
+      log($, `teammate ${short(agentId)} non più in elenco: nessun rilancio`)
+      return
+    }
+    if (!isEnding && info.status !== 'idle') {
+      log($, `handoff ${handoff.id} validato, ma il teammate ${short(agentId)} è ${info.status}: rilancio al suo prossimo fine turno`)
+      return
+    }
+    const input = await orElse(read($, { ...AGENT_INPUTS, id: agentId }), undefined)
+    const name = input?.name ?? info.teammateId?.split('@')[0] ?? agentId
+    // Ogni rilancio dà un id nuovo: il tetto e il dedupe contano per una chiave stabile (nome, teammateId, id).
+    const key = input?.name ?? info.teammateId ?? agentId
+    const now = await $.clock.now()
+    const restarts = ((await $.store.get(RESTARTS_KEY)) as RestartRecord[] | undefined) ?? []
+    if (restarts.some(restart => restart.agent === key && restart.handoff === handoff.id)) {
+      log($, `l'handoff ${handoff.id} ha già avuto il suo rilancio: nessun nuovo rilancio`)
+      return
+    }
+    if (restarts.filter(restart => restart.agent === key && now - restart.at < HOUR_MS).length >= maxRestartsPerHour) {
+      reportOnce($, handoff, `limite di ${maxRestartsPerHour} rilanci in un'ora per il teammate ${key}: l'handoff ${handoff.id} resta in attesa`)
+      return
+    }
+    const archived = await archiveCopy($, handoff)
+    const prompt = agentResume(handoff.text, archived)
+    let newId: string | undefined
+    let isTeammate = false
+    try {
+      const stop = await $.tool.call({ tool: 'TaskStop', task_id: agentId })
+      const stopRefused = refusalOf(stop)
+      if (stopRefused !== undefined) return await handToLead($, agentId, name, handoff, `TaskStop non riuscito: ${stopRefused}`)
+      // Il motore non lascia a un plugin il tool Agent via $.tool.call ("that is $.agent.spawn"): si rilancia
+      // con $.agent.spawn, con nome, tipo, modello e descrizione dell'input originale (o della lista).
+      const subagentType = input?.subagent_type ?? (info.type === 'teammate' ? undefined : info.type)
+      const spawned = await $.agent.spawn({
+        name,
+        description: input?.description ?? info.description,
+        prompt,
+        ...(subagentType === undefined ? {} : { subagentType }),
+        ...(input?.model === undefined ? {} : { model: input.model }),
+      })
+      if (spawned.deny !== undefined) return await handToLead($, agentId, name, handoff, `Agent non riuscito: ${spawned.deny}`)
+      newId = spawned.agentId
+      isTeammate = await isRestartedTeammate($, spawned, name, agentId)
+    } catch (error) {
+      return await handToLead($, agentId, name, handoff, errorText(error))
+    }
+    await $.store.set(RESTARTS_KEY, [...restarts, { at: now, agent: key, handoff: handoff.id }].slice(-RESTARTS_KEPT))
+    forgetAgent(agentId)
+    // $.agent.spawn non ha il team tra gli argomenti: senza teammateId il rilanciato non è un teammate.
+    // Riserva sul lead, che con il tool Agent può rilanciarlo nel team; l'handoff resta in pending/.
+    if (!isTeammate) {
+      const reason = `il rilanciato ${newId === undefined ? '' : `${short(newId)} `}non risulta un teammate: fermalo e rilancialo nel team`
+      $.ui.toast(`auto-clear-context: teammate «${name}» rilanciato fuori dal team, istruzioni alla principale`)
+      return await handToLead($, agentId, name, handoff, reason)
+    }
+    // Il nuovo teammate si rilancia uguale al prossimo giro: l'input passa al suo id.
+    if (newId !== undefined && input !== undefined) {
+      await orElse($.state.set({ ...AGENT_INPUTS, id: newId }, input), undefined)
+    }
+    await $.fs.write(handoff.path, '')
+    log($, `teammate ${short(agentId)} fermato e rilanciato${newId === undefined ? '' : ` come ${short(newId)}`} con l'handoff ${handoff.id} (copia in ${archived})`)
+  } finally {
+    restarting.delete(agentId)
+  }
+}
+
+const roundsOf = (text: string) => Number(frontField(/^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '', 'rounds') ?? 0) || 0
+
+const unclaimedValidator = async ($: EngineInterface) => {
+  const list = await orElse($.agent.list(), [] as readonly AgentInfo[])
+  const found = list.find(agent => agent.type === VALIDATOR && !ownAgents.has(agent.id))
+  if (found !== undefined) ownAgents.add(found.id)
+  return found?.id
+}
+
+// Fine turno di un teammate: con l'handoff `ready` parte il validatore (uno solo per volta).
+const checkTeammate = async ($: EngineInterface, agentId: string) => {
+  if (!agentsEnabled || ownAgents.has(agentId) || checking.has(agentId)) return
+  checking.add(agentId)
+  let isStarted = false
+  try {
+    const info = await findAgent($, agentId)
+    if (info === undefined || kindOf(info) !== 'teammate') return
+    const handoff = await findAgentHandoff($, agentId)
+    // Handoff già validato e rilancio rimandato (il teammate era in lavoro): ora il turno è finito.
+    if (handoff?.status === 'validated') return await restartAgent($, agentId, handoff, true)
+    if (handoff?.status !== 'ready') return
+    const path = handoff.path
+    const round = Math.max(roundsOf(handoff.text), doneRounds.get(agentId) ?? 0) + 1
+    const spawned = await $.agent.spawn({
+      subagentType: VALIDATOR,
+      description: `Valida l'handoff di ${short(agentId)}`,
+      prompt: path,
+    })
+    // L'id lo dà il motore; se manca, è il validatore in elenco che la mod non ha ancora preso.
+    const validatorId = spawned.deny === undefined ? (spawned.agentId ?? (await unclaimedValidator($))) : undefined
+    if (validatorId === undefined) {
+      log($, `validatore dell'handoff del teammate ${short(agentId)} non avviato: ${spawned.deny ?? 'id non trovato'}`)
+      return
+    }
+    ownAgents.add(validatorId)
+    validating.set(validatorId, { agentId, path, round })
+    isStarted = true
+    log($, `handoff del teammate ${short(agentId)} pronto: validatore ${short(validatorId)} (giro ${round})`)
+  } finally {
+    if (!isStarted) checking.delete(agentId)
+  }
+}
+
+// Fine turno del validatore: completo, oppure lacune al teammate (giro 1) o accettate e annotate (giro 2).
+const concludeValidation = async ($: EngineInterface, validatorId: string, answer: string) => {
+  const job = validating.get(validatorId)
+  if (job === undefined) return
+  validating.delete(validatorId)
+  try {
+    const handoff = await readHandoff($, job.path)
+    if (handoff === undefined || handoff.status !== 'ready') {
+      log($, `handoff del teammate ${short(job.agentId)} cambiato durante la validazione: nessun verdetto applicato`)
+      return
+    }
+    const verdict = parseVerdict(answer)
+    const rounds = String(Math.max(job.round, roundsOf(handoff.text)))
+    doneRounds.set(job.agentId, Number(rounds))
+    if (verdict.isComplete || job.round >= 2) {
+      doneRounds.delete(job.agentId)
+      const base = setFront(handoff.text, { status: 'validated', rounds })
+      await $.fs.write(job.path, verdict.isComplete || verdict.gaps === '' ? base : appendGaps(base, verdict.gaps))
+      log($, `handoff del teammate ${short(job.agentId)} validato (giro ${job.round}${verdict.isComplete ? '' : ', con lacune annotate'})`)
+      const validated = await readHandoff($, job.path)
+      if (validated !== undefined) await restartAgent($, job.agentId, validated)
+      return
+    }
+    await $.fs.write(job.path, setFront(handoff.text, { rounds }))
+    const gaps = verdict.gaps === '' ? '(il validatore non ha indicato le lacune)' : verdict.gaps
+    await $.session.send({
+      to: { agentId: job.agentId },
+      text: `Il validatore dell'handoff ha segnalato lacune:\n${gaps}\nCorreggi ${job.path} e rimetti status: ready, poi chiudi il turno con una riga.`,
+    })
+    log($, `handoff del teammate ${short(job.agentId)}: lacune mandate al teammate (giro ${job.round})`)
+  } finally {
+    checking.delete(job.agentId)
+  }
+}
+
+// Gli agenti che trattengono il clear: pending/running/waiting. Un teammate idle, i validatori e gli agenti
+// avviati dalla mod non contano, né `ending`, l'agente al suo turn.complete (la lista può dirlo ancora running).
+const activeAgents = async ($: EngineInterface, ending?: string) =>
+  (await orElse($.agent.list(), [] as readonly AgentInfo[])).filter(
+    agent => BUSY.includes(agent.status) && !ownAgents.has(agent.id) && agent.type !== VALIDATOR && agent.id !== ending,
+  )
+
+const resetDeferral = () => {
+  deferredSince = undefined
+  deferredId = undefined
+  isDeferWarned = false
+  pausedFor.clear()
+}
+
+// Dopo 20 minuti di rinvio, un avviso una volta sola: il clear non si forza, perché l'effetto di /clear
+// sugli agenti in corso non è garantito dall'API.
+const warnLongDeferral = async ($: EngineInterface) => {
+  if (deferredSince === undefined || isDeferWarned) return
+  const elapsed = (await $.clock.now()) - deferredSince
+  if (elapsed < DEFER_WARN_MS) return
+  isDeferWarned = true
+  const names = (await activeAgents($)).map(agent => `${agent.description} (${short(agent.id)})`).join(', ')
+  const text = `clear rimandato da ${Math.floor(elapsed / 60_000)} minuti: agenti attivi ${names === '' ? 'nessuno' : names}`
+  $.ui.toast(`auto-clear-context: ${text}`)
+  log($, text)
+}
+
+// La nota di pausa per un agente attivo, una volta per handoff della principale in attesa del clear.
+const pauseContext = async ($: EngineInterface, agentId: string): Promise<string | undefined> => {
+  if (!agentsEnabled || deferredId === undefined || ownAgents.has(agentId)) return undefined
+  await warnLongDeferral($)
+  if (pausedFor.get(agentId) === deferredId) return undefined
+  pausedFor.set(agentId, deferredId)
+  log($, `agente ${short(agentId)}: nota di pausa, la principale riparte con /clear`)
+  return pauseNote()
+}
+
+// Il clear della principale, se l'handoff è validato e nessun agente è attivo. Si ricontrolla a ogni fine turno
+// della principale e di un agente (reason dice da chi arriva; `ending` è l'agente che sta finendo il turno).
+const tryClear = async ($: EngineInterface, reason: string, ending?: string) => {
+  if (isClearRequested || isTryingClear) return
+  isTryingClear = true
+  try {
+    const session = await $.session.id()
+    const handoff = await readOwnHandoff($, session)
+    if (handoff?.status !== 'validated') {
+      resetDeferral()
+      return
+    }
+    const now = await $.clock.now()
+    const clears = ((await $.store.get(CLEARS_KEY)) as ClearRecord[] | undefined) ?? []
+    if (clears.some(clear => clear.handoff === handoff.id)) {
+      log($, `l'handoff ${handoff.id} ha già avuto il suo clear: nessun nuovo clear`)
+      return
+    }
+    if (clears.filter(clear => now - clear.at < HOUR_MS).length >= maxClearsPerHour) {
+      log($, `limite di ${maxClearsPerHour} clear in un'ora raggiunto: l'handoff ${handoff.id} resta in attesa`)
+      return
+    }
+    const busy = await activeAgents($, ending)
+    if (busy.length > 0) {
+      if (deferredId !== handoff.id) {
+        resetDeferral()
+        deferredId = handoff.id
+        deferredSince = now
+        log($, `handoff ${handoff.id} validato, ma ${busy.length} agenti ancora attivi: clear rimandato a quando si fermano (${reason})`)
+      }
+      await warnLongDeferral($)
+      return
+    }
+
+    // La principale può essere ripartita durante gli await: il /clear spazzerebbe il suo prompt.
+    if (isMainBusy) return
+    isClearRequested = true
+    resetDeferral()
+    try {
+      await $.store.set(CLEARS_KEY, [...clears, { at: now, handoff: handoff.id }].slice(-CLEARS_KEPT))
+    } catch (error) {
+      isClearRequested = false
+      throw error
+    }
+    log($, `handoff ${handoff.id} della sessione ${short(session)} validato: eseguo /clear (${reason})`)
+    runClear($, true)
+  } finally {
+    isTryingClear = false
+  }
+}
+
 export const register: Register = (on, options) => {
   // Le soglie di /config; quelle in vigore le dà readSettings a ogni controllo.
   const configured: Pair = {
     threshold: Number(options.threshold ?? DEFAULTS.threshold),
     hardThreshold: Number(options.hardThreshold ?? DEFAULTS.hardThreshold),
   }
-  const maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
+  maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
+  maxRestartsPerHour = maxClearsPerHour
+  agentsEnabled = options.agents !== false
+  const agentThreshold = Number(options.agentThreshold ?? 0)
 
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
     // Il pannello di /soglia, se è aperto, segue l'uso del contesto.
     if (e.changed.includes('context')) $.ui.invalidate('ui.render')
+    mainWindow = e.context.window
     const percent = e.context.percent
     if (percent === undefined) return result
     const limits = await effectiveLimits($, configured)
@@ -663,7 +1042,12 @@ export const register: Register = (on, options) => {
 
   on('classic.PostToolUse', async ($, e, next) => {
     const result = await next(e)
-    if (e.agent_id !== undefined) return result
+    if (e.agent_id !== undefined) {
+      const notes = [await agentZoneContext($, e.agent_id, configured, agentThreshold), await pauseContext($, e.agent_id)].filter(
+        (note): note is string => note !== undefined,
+      )
+      return notes.length === 0 ? result : { ...result, additionalContext: [...(result.additionalContext ?? []), ...notes] }
+    }
     const now = await $.clock.now()
     if (now - lastCheckAt < CHECK_EVERY_MS) return result
     lastCheckAt = now
@@ -680,6 +1064,39 @@ export const register: Register = (on, options) => {
     return { ...result, additionalContext: [...(result.additionalContext ?? []), await buildNote($, zone, percent, limits, session)] }
   }).catch(($, e, next) => next(e))
 
+  // Streaming: i pezzi passano intatti; si legge solo l'usage del passo di un agente.
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    const usage = result.usage
+    if (e.agentId !== undefined && usage != null) {
+      agentTokens.set(e.agentId, usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens)
+    }
+    return result
+  }).catch(async function* ($, e, next) {
+    return yield* next(e)
+  })
+
+  // Un teammate avviato dal tool Agent: se ne tiene l'input, per rilanciarlo uguale. Solo osservazione.
+  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    const result = await next(e)
+    const record = result.result as { status?: string; agentId?: string; agent_id?: string } | undefined
+    if (record?.status !== 'teammate_spawned') return result
+    const agentId = record.agentId ?? record.agent_id
+    if (agentId === undefined) return result
+    const input: AgentInput = { description: e.description }
+    if (e.name !== undefined) input.name = e.name
+    if (e.subagent_type !== undefined) input.subagent_type = e.subagent_type
+    if (e.model !== undefined) input.model = e.model
+    if (e.effort !== undefined) input.effort = e.effort
+    // Il teammate è già partito: un errore qui non deve far richiamare next dal catch (lancio doppio).
+    try {
+      await $.state.set({ ...AGENT_INPUTS, id: agentId }, input)
+    } catch (error) {
+      log($, `input del teammate ${short(agentId)} non registrato: ${errorText(error)}`)
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
   on('prompt.submit', async ($, e, next) => {
     if (pendingNote === undefined) return next(e)
     const note = pendingNote
@@ -690,41 +1107,47 @@ export const register: Register = (on, options) => {
     return next({ ...e, context: [...(e.context ?? []), note.text] })
   }).catch(($, e, next) => next(e))
 
+  // La principale in un turno: il clear aspetta la sua fine turno, anche se un agente si ferma prima.
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) isMainBusy = true
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
+    // Prima di next: se next lancia, la principale non resta "in un turno" per sempre.
+    if (e.agentId === undefined) isMainBusy = false
     const result = await next(e)
-    if (e.agentId !== undefined || e.isAborted || isClearRequested) return result
-    const session = await $.session.id()
-    const handoff = await readOwnHandoff($, session)
-    if (handoff?.status !== 'validated') return result
-
-    const now = await $.clock.now()
-    const clears = ((await $.store.get(CLEARS_KEY)) as ClearRecord[] | undefined) ?? []
-    if (clears.some(clear => clear.handoff === handoff.id)) {
-      log($, `l'handoff ${handoff.id} ha già avuto il suo clear: nessun nuovo clear`)
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      if (e.isAborted) {
+        // Validatore annullato: si libera il teammate, il suo prossimo turno rilancia lo stesso giro.
+        const job = validating.get(agentId)
+        if (job !== undefined) {
+          validating.delete(agentId)
+          checking.delete(job.agentId)
+          log($, `validatore ${short(agentId)} annullato: l'handoff del teammate ${short(job.agentId)} sarà validato al suo prossimo turno`)
+        }
+      } else {
+        const run = validating.has(agentId) ? concludeValidation($, agentId, e.answer) : checkTeammate($, agentId)
+        await run.catch((error: unknown) => log($, `agente ${short(agentId)}: validazione non riuscita: ${errorText(error)}`))
+      }
+      // Un agente che si ferma può liberare il clear della principale, se questa è ferma.
+      if (!isMainBusy) {
+        await tryClear($, `agente ${short(agentId)} fermo`, agentId).catch((error: unknown) => log($, `clear non controllato: ${errorText(error)}`))
+      }
       return result
     }
-    if (clears.filter(clear => now - clear.at < HOUR_MS).length >= maxClearsPerHour) {
-      log($, `limite di ${maxClearsPerHour} clear in un'ora raggiunto: l'handoff ${handoff.id} resta in attesa`)
-      return result
-    }
-    const busy = (await orElse($.agent.list(), [])).filter(agent => BUSY.includes(agent.status))
-    if (busy.length > 0) {
-      log($, `handoff ${handoff.id} validato, ma ${busy.length} subagent ancora attivi: clear rimandato al prossimo fine turno`)
-      return result
-    }
-
-    await $.store.set(CLEARS_KEY, [...clears, { at: now, handoff: handoff.id }].slice(-CLEARS_KEPT))
-    isClearRequested = true
-    log($, `handoff ${handoff.id} della sessione ${short(session)} validato: eseguo /clear`)
-    runClear($, true)
+    if (e.isAborted || isClearRequested) return result
+    await tryClear($, 'fine turno della principale')
     return result
-  })
+  }).catch(($, e, next) => next(e))
 
   on('session.end', ($, e, next) => {
     if (e.reason === 'clear') clearedSession = e.sessionId
     if (e.reason === 'clear' && isClearRequested) {
       isClearRequested = false
       pendingNote = undefined
+      resetDeferral()
       log($, 'clear eseguito: invio il prompt di ripresa')
       $.prompt.submit({ text: RESUME }).then(
         submitted => {

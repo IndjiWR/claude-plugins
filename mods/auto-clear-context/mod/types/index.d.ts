@@ -22,12 +22,17 @@ export type ThresholdZone = 0 | 1 | 2 | 3
  */
 export type ThresholdWrite = { field: ThresholdField; value: number; key?: string; override?: number }
 
+/** L'input con cui è stato lanciato un teammate (tool Agent): il rilancio lo ripete. */
+export type AgentInput = { name?: string; subagent_type?: string; model?: string; description: string; effort?: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'auto-clear-context': {
       thresholdNotice: ThresholdNotice | null
-      /** Per session id: la zona più alta già segnalata a Claude in quella sessione. */
+      /** Per session id (o `agent:<agentId>` per un agente): la zona più alta già segnalata a Claude. */
       signaledZone: StateFamily<ThresholdZone>
+      /** Per agentId: l'input dell'Agent che ha avviato il teammate. */
+      agentInputs: StateFamily<AgentInput>
       /** Il valore che il pannello di /soglia sta modificando. */
       paneTarget: ThresholdField
       pendingWrite: ThresholdWrite | null
