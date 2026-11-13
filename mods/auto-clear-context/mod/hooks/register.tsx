@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentZoneNote } from './agents'
+import { agentHandoffPath, agentLimits, agentZoneNote, appendGaps, parseVerdict, setFront } from './agents'
 import type { AgentKind } from './agents'
-import type { ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
+import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
 // Vicino alle soglie di contesto Claude salva lo stato in un handoff validato
 // (skill auto-clear-context:handoff); a fine turno la mod esegue /clear e, nella
@@ -168,6 +168,15 @@ let mainWindow: number | undefined
 // Gli agenti avviati dalla mod (validatori, teammate rilanciati): niente note di zona.
 const ownAgents = new Set<string>()
 let agentsEnabled = true
+// Validazione dell'handoff di un teammate: `checking` tiene gli agenti con un controllo in corso
+// (preso in modo sincrono, perché due turn.complete ravvicinati non lancino due validatori);
+// `validating` ricorda per ogni validatore lanciato di chi è, il file e il giro.
+const checking = new Set<string>()
+const validating = new Map<string, { agentId: string; path: string; round: number }>()
+// I giri già fatti per teammate: se il teammate riscrive il file senza `rounds`, il conto non riparte da 0.
+const doneRounds = new Map<string, number>()
+const VALIDATOR = 'auto-clear-context:handoff-validator'
+const AGENT_INPUTS = { plugin: 'auto-clear-context', key: 'agentInputs' } as const
 // La sessione che l'ultimo /clear ha chiuso: SessionStart (clear) allega il suo
 // handoff, perché la sessione nuova ha già un altro id.
 let clearedSession: string | undefined
@@ -655,8 +664,11 @@ const agentZoneContext = async ($: EngineInterface, agentId: string, configured:
   if (!agentsEnabled || tokens === undefined || ownAgents.has(agentId)) return undefined
   const limits = agentLimits(await effectiveLimits($, configured), agentThreshold)
   if (limits.soft <= 0) return undefined
-  mainWindow ??= (await $.session.usage()).context.window
-  if (!(mainWindow > 0)) return undefined
+  if (!(mainWindow !== undefined && mainWindow > 0)) {
+    const window = (await $.session.usage()).context.window
+    if (!(window > 0)) return undefined
+    mainWindow = window
+  }
   const percent = Math.round((tokens * 100) / mainWindow)
   const zone = zoneOf(percent, limits)
   if (zone === 0) return undefined
@@ -666,6 +678,89 @@ const agentZoneContext = async ($: EngineInterface, agentId: string, configured:
   if (!(await markSignaled($, `${session}:${agentId}`, zone))) return undefined
   log($, `agente ${short(agentId)} al ${percent}% (${ZONE_NAMES[zone]}): nota di handoff`)
   return agentZoneNote(kindOf(info), zone, percent, limits, agentHandoffPath(session, agentId), info.type)
+}
+
+// Rilancio del teammate con l'handoff validato: lo implementa il Task 4.
+const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handoff) => {
+  log($, `handoff ${handoff.id} del teammate ${short(agentId)} validato: rilancio non ancora implementato`)
+}
+
+const roundsOf = (text: string) => Number(frontField(/^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '', 'rounds') ?? 0) || 0
+
+const unclaimedValidator = async ($: EngineInterface) => {
+  const list = await orElse($.agent.list(), [] as readonly AgentInfo[])
+  const found = list.find(agent => agent.type === VALIDATOR && !ownAgents.has(agent.id))
+  if (found !== undefined) ownAgents.add(found.id)
+  return found?.id
+}
+
+// Fine turno di un teammate: con l'handoff `ready` parte il validatore (uno solo per volta).
+const checkTeammate = async ($: EngineInterface, agentId: string) => {
+  if (!agentsEnabled || ownAgents.has(agentId) || checking.has(agentId)) return
+  checking.add(agentId)
+  let isStarted = false
+  try {
+    const info = await findAgent($, agentId)
+    if (info === undefined || kindOf(info) !== 'teammate') return
+    const session = await $.session.id()
+    const { root } = await paths($)
+    const path = `${root}/${agentHandoffPath(session, agentId)}`
+    const handoff = await readHandoff($, path)
+    if (handoff?.status !== 'ready') return
+    const round = Math.max(roundsOf(handoff.text), doneRounds.get(agentId) ?? 0) + 1
+    const spawned = await $.agent.spawn({
+      subagentType: VALIDATOR,
+      description: `Valida l'handoff di ${short(agentId)}`,
+      prompt: path,
+    })
+    // L'id lo dà il motore; se manca, è il validatore in elenco che la mod non ha ancora preso.
+    const validatorId = spawned.deny === undefined ? (spawned.agentId ?? (await unclaimedValidator($))) : undefined
+    if (validatorId === undefined) {
+      log($, `validatore dell'handoff del teammate ${short(agentId)} non avviato: ${spawned.deny ?? 'id non trovato'}`)
+      return
+    }
+    ownAgents.add(validatorId)
+    validating.set(validatorId, { agentId, path, round })
+    isStarted = true
+    log($, `handoff del teammate ${short(agentId)} pronto: validatore ${short(validatorId)} (giro ${round})`)
+  } finally {
+    if (!isStarted) checking.delete(agentId)
+  }
+}
+
+// Fine turno del validatore: completo, oppure lacune al teammate (giro 1) o accettate e annotate (giro 2).
+const concludeValidation = async ($: EngineInterface, validatorId: string, answer: string) => {
+  const job = validating.get(validatorId)
+  if (job === undefined) return
+  validating.delete(validatorId)
+  try {
+    const handoff = await readHandoff($, job.path)
+    if (handoff === undefined || handoff.status !== 'ready') {
+      log($, `handoff del teammate ${short(job.agentId)} cambiato durante la validazione: nessun verdetto applicato`)
+      return
+    }
+    const verdict = parseVerdict(answer)
+    const rounds = String(Math.max(job.round, roundsOf(handoff.text)))
+    doneRounds.set(job.agentId, Number(rounds))
+    if (verdict.isComplete || job.round >= 2) {
+      doneRounds.delete(job.agentId)
+      const base = setFront(handoff.text, { status: 'validated', rounds })
+      await $.fs.write(job.path, verdict.isComplete || verdict.gaps === '' ? base : appendGaps(base, verdict.gaps))
+      log($, `handoff del teammate ${short(job.agentId)} validato (giro ${job.round}${verdict.isComplete ? '' : ', con lacune annotate'})`)
+      const validated = await readHandoff($, job.path)
+      if (validated !== undefined) await restartAgent($, job.agentId, validated)
+      return
+    }
+    await $.fs.write(job.path, setFront(handoff.text, { rounds }))
+    const gaps = verdict.gaps === '' ? '(il validatore non ha indicato le lacune)' : verdict.gaps
+    await $.session.send({
+      to: { agentId: job.agentId },
+      text: `Il validatore dell'handoff ha segnalato lacune:\n${gaps}\nCorreggi ${job.path} e rimetti status: ready, poi chiudi il turno con una riga.`,
+    })
+    log($, `handoff del teammate ${short(job.agentId)}: lacune mandate al teammate (giro ${job.round})`)
+  } finally {
+    checking.delete(job.agentId)
+  }
 }
 
 export const register: Register = (on, options) => {
@@ -730,6 +825,22 @@ export const register: Register = (on, options) => {
     return yield* next(e)
   })
 
+  // Un teammate avviato dal tool Agent: se ne tiene l'input, per rilanciarlo uguale. Solo osservazione.
+  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    const result = await next(e)
+    const record = result.result as { status?: string; agentId?: string; agent_id?: string } | undefined
+    if (record?.status !== 'teammate_spawned') return result
+    const agentId = record.agentId ?? record.agent_id
+    if (agentId === undefined) return result
+    const input: AgentInput = { description: e.description }
+    if (e.name !== undefined) input.name = e.name
+    if (e.subagent_type !== undefined) input.subagent_type = e.subagent_type
+    if (e.model !== undefined) input.model = e.model
+    if (e.effort !== undefined) input.effort = e.effort
+    await $.state.set({ ...AGENT_INPUTS, id: agentId }, input)
+    return result
+  }).catch(($, e, next) => next(e))
+
   on('prompt.submit', async ($, e, next) => {
     if (pendingNote === undefined) return next(e)
     const note = pendingNote
@@ -742,7 +853,14 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId !== undefined || e.isAborted || isClearRequested) return result
+    if (e.agentId !== undefined) {
+      if (e.isAborted) return result
+      const agentId = e.agentId
+      const run = validating.has(agentId) ? concludeValidation($, agentId, e.answer) : checkTeammate($, agentId)
+      await run.catch((error: unknown) => log($, `agente ${short(agentId)}: validazione non riuscita: ${errorText(error)}`))
+      return result
+    }
+    if (e.isAborted || isClearRequested) return result
     const session = await $.session.id()
     const handoff = await readOwnHandoff($, session)
     if (handoff?.status !== 'validated') return result

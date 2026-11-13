@@ -70,7 +70,8 @@ export const pauseNote = () =>
 // Il verdetto del validatore: righe LACUNE: … e VERDETTO: completo | da integrare.
 export const parseVerdict = (answer: string): { isComplete: boolean; gaps: string } => {
   const verdict = /^\s*VERDETTO:\s*(.*)$/im.exec(answer)
-  const isComplete = verdict !== null && /\bcompleto\b/i.test(verdict[1]) && !/da integrare/i.test(verdict[1])
+  const verdictText = verdict?.[1] ?? ''
+  const isComplete = verdict !== null && /\bcompleto\b/i.test(verdictText) && !/da integrare/i.test(verdictText)
   const gaps = /LACUNE:([\s\S]*?)(?=^\s*VERDETTO:|$(?![\s\S]))/m.exec(answer)?.[1]?.trim() ?? ''
   return { isComplete, gaps }
 }
@@ -78,7 +79,7 @@ export const parseVerdict = (answer: string): { isComplete: boolean; gaps: strin
 // Sostituisce o aggiunge campi nel frontmatter; senza frontmatter lo crea.
 export const setFront = (text: string, fields: Record<string, string>): string => {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
-  const lines = match ? match[1].split(/\r?\n/) : []
+  const lines = match ? (match[1] ?? '').split(/\r?\n/) : []
   const body = match ? text.slice(match[0].length) : text
   for (const [key, value] of Object.entries(fields)) {
     const at = lines.findIndex(line => line.startsWith(`${key}:`))
