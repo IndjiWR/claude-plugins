@@ -455,3 +455,28 @@ test('TaskStop che lancia: un solo prompt alla principale, nessun rilancio', asy
   expect(state.prompts.length).toBe(1)
   expect(state.files.get(FILE)).toContain('status: validated')
 })
+
+test('catena di rilanci a1, a2, a3 dello stesso teammate: oltre maxClearsPerHour il successivo non parte', { options: { maxClearsPerHour: 2 } }, async ($, on) => {
+  const list: object[] = [...idleMate(), validator('v3')]
+  const state = world(on, list)
+  const mate = (id: string) => ({ id, teammateId: 'pose@t', type: 'general-purpose', description: 'x', status: 'idle' })
+  // Ogni rilancio dà un id nuovo (qui messo in elenco a mano) ma lo stesso name: il conteggio è del teammate.
+  const hop = async (from: string, text: string) => {
+    state.files.set(`.claude/handoff/pending/s1--${from}.md`, text)
+    await turnEnd($, from)
+    await turnEnd($, `v${from.slice(1)}`, 'LACUNE: nessuna\nVERDETTO: completo')
+  }
+  await hop('a1', ready('n: 1\n'))
+  expect(restarted(state).length).toBe(1)
+  list.push(mate('a2'))
+  await hop('a2', ready('n: 2\n').replace('agent: a1', 'agent: a2'))
+  expect(restarted(state).length).toBe(2)
+  list.push(mate('a3'))
+  state.spawns.length = 0
+  state.toolCalls.length = 0
+  await hop('a3', ready('n: 3\n').replace('agent: a1', 'agent: a3'))
+  expect(restarted(state).length).toBe(0)
+  expect(toolsCalled(state)).toEqual([])
+  expect(state.files.get('.claude/handoff/pending/s1--a3.md')).toContain('status: validated')
+  expect(state.logs.some(line => line.includes('limite di 2 rilanci'))).toBe(true)
+})

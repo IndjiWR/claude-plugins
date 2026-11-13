@@ -36,6 +36,7 @@ import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, Thres
 // `session` è l'id nel frontmatter, se c'è; `path` il file da cui viene.
 type Handoff = { text: string; status: string; session: string | undefined; id: string; path: string }
 type ClearRecord = { at: number; handoff: string }
+// `agent` è la chiave stabile del teammate (nome, teammateId o id), non l'id: cambia a ogni rilancio.
 type RestartRecord = { at: number; agent: string; handoff: string }
 type Field = ThresholdField
 type Pair = Record<Field, number>
@@ -732,18 +733,20 @@ const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handof
       log($, `handoff ${handoff.id} validato, ma il teammate ${short(agentId)} è ${info.status}: rilancio al suo prossimo fine turno`)
       return
     }
+    const input = await orElse(read($, { ...AGENT_INPUTS, id: agentId }), undefined)
+    const name = input?.name ?? info.teammateId?.split('@')[0] ?? agentId
+    // Ogni rilancio dà un id nuovo: il tetto e il dedupe contano per una chiave stabile (nome, teammateId, id).
+    const key = input?.name ?? info.teammateId ?? agentId
     const now = await $.clock.now()
     const restarts = ((await $.store.get(RESTARTS_KEY)) as RestartRecord[] | undefined) ?? []
-    if (restarts.some(restart => restart.agent === agentId && restart.handoff === handoff.id)) {
+    if (restarts.some(restart => restart.agent === key && restart.handoff === handoff.id)) {
       log($, `l'handoff ${handoff.id} ha già avuto il suo rilancio: nessun nuovo rilancio`)
       return
     }
-    if (restarts.filter(restart => restart.agent === agentId && now - restart.at < HOUR_MS).length >= maxRestartsPerHour) {
-      reportOnce($, handoff, `limite di ${maxRestartsPerHour} rilanci in un'ora per il teammate ${short(agentId)}: l'handoff ${handoff.id} resta in attesa`)
+    if (restarts.filter(restart => restart.agent === key && now - restart.at < HOUR_MS).length >= maxRestartsPerHour) {
+      reportOnce($, handoff, `limite di ${maxRestartsPerHour} rilanci in un'ora per il teammate ${key}: l'handoff ${handoff.id} resta in attesa`)
       return
     }
-    const input = await orElse(read($, { ...AGENT_INPUTS, id: agentId }), undefined)
-    const name = input?.name ?? info.teammateId?.split('@')[0] ?? agentId
     const archived = await archiveCopy($, handoff)
     const prompt = agentResume(handoff.text, archived)
     let newId: string | undefined
@@ -766,7 +769,7 @@ const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handof
     } catch (error) {
       return await handToLead($, agentId, name, handoff, errorText(error))
     }
-    await $.store.set(RESTARTS_KEY, [...restarts, { at: now, agent: agentId, handoff: handoff.id }].slice(-RESTARTS_KEPT))
+    await $.store.set(RESTARTS_KEY, [...restarts, { at: now, agent: key, handoff: handoff.id }].slice(-RESTARTS_KEPT))
     forgetAgent(agentId)
     // Il nuovo teammate si rilancia uguale al prossimo giro: l'input passa al suo id.
     if (newId !== undefined && input !== undefined) {
