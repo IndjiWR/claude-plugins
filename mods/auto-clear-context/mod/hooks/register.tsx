@@ -177,9 +177,8 @@ let deferredId: string | undefined
 let isDeferWarned = false
 // Per agente, l'impronta dell'handoff della principale per cui ha già avuto la nota di pausa.
 const pausedFor = new Map<string, string>()
-// Contesto dell'ultimo passo di ogni agente (turn.step) e finestra della principale, su cui se ne calcola la percentuale.
+// Contesto dell'ultimo passo di ogni agente (turn.step), in token: le zone degli agenti sono in token assoluti.
 const agentTokens = new Map<string, number>()
-let mainWindow: number | undefined
 // Il percorso dell'handoff dato a ogni agente con la prima nota: resta quello anche dopo un /clear della principale.
 const agentPaths = new Map<string, string>()
 // Gli agenti avviati dalla mod (validatori, teammate rilanciati): niente note di zona.
@@ -1028,7 +1027,6 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     // Il pannello di /soglia, se è aperto, segue l'uso del contesto.
     if (e.changed.includes('context')) $.ui.invalidate('ui.render')
-    mainWindow = e.context.window
     const percent = e.context.percent
     if (percent === undefined) return result
     const limits = await effectiveLimits($, configured)
