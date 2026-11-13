@@ -322,6 +322,32 @@ test('da integrare: giro 1 manda le lacune al teammate, giro 2 accetta e le anno
   expect(state.sends.length).toBe(1)
 })
 
+test('handoff riscritto durante la validazione: nuova validazione subito', async ($, on) => {
+  const state = world(on, teammate)
+  state.files.set(FILE, ready())
+  await turnEnd($, 'a1')
+  expect(state.spawns.length).toBe(1)
+  // il teammate riscrive l'handoff mentre v1 lavora; il suo fine turno è bloccato da `checking`
+  state.files.set(FILE, ready().replace('Fare x.', 'Fare y.'))
+  await turnEnd($, 'a1')
+  expect(state.spawns.length).toBe(1)
+  await turnEnd($, 'v1', 'LACUNE: nessuna\nVERDETTO: completo')
+  expect(state.files.get(FILE)).not.toContain('status: validated')
+  expect(state.spawns.length).toBe(2)
+  expect(state.toolCalls.filter(c => c.tool === 'TaskStop').length).toBe(0)
+})
+
+test('handoff cancellato durante la validazione: nessun rilancio', async ($, on) => {
+  const state = world(on, teammate)
+  state.files.set(FILE, ready())
+  await turnEnd($, 'a1')
+  state.files.delete(FILE)
+  await turnEnd($, 'v1', 'LACUNE: nessuna\nVERDETTO: completo')
+  expect(state.spawns.length).toBe(1)
+  expect(state.toolCalls.filter(c => c.tool === 'TaskStop').length).toBe(0)
+  expect(state.logs.join('\n')).toContain('handoff del teammate a1 rimosso durante la validazione: nessun rilancio')
+})
+
 test('il validatore non riceve note di zona: sta in ownAgents', async ($, on) => {
   const state = world(on, teammate)
   state.files.set(FILE, ready())

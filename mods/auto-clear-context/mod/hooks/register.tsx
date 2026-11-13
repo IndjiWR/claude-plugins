@@ -188,7 +188,7 @@ let agentsEnabled = true
 // (preso in modo sincrono, perché due turn.complete ravvicinati non lancino due validatori);
 // `validating` ricorda per ogni validatore lanciato di chi è, il file e il giro.
 const checking = new Set<string>()
-const validating = new Map<string, { agentId: string; path: string; round: number }>()
+const validating = new Map<string, { agentId: string; path: string; round: number; id: string }>()
 // I giri già fatti per teammate: se il teammate riscrive il file senza `rounds`, il conto non riparte da 0.
 const doneRounds = new Map<string, number>()
 // Rilancio del teammate: tetto orario (come i clear), rilanci in corso e handoff già passati alla principale.
@@ -874,7 +874,7 @@ const checkTeammate = async ($: EngineInterface, agentId: string) => {
       return
     }
     ownAgents.add(validatorId)
-    validating.set(validatorId, { agentId, path, round })
+    validating.set(validatorId, { agentId, path, round, id: handoff.id })
     isStarted = true
     log($, `handoff del teammate ${short(agentId)} pronto: validatore ${short(validatorId)} (giro ${round})`)
   } finally {
@@ -887,10 +887,21 @@ const concludeValidation = async ($: EngineInterface, validatorId: string, answe
   const job = validating.get(validatorId)
   if (job === undefined) return
   validating.delete(validatorId)
+  let isChanged = false
   try {
     const handoff = await readHandoff($, job.path)
-    if (handoff === undefined || handoff.status !== 'ready') {
+    if (handoff === undefined) {
+      log($, `handoff del teammate ${short(job.agentId)} rimosso durante la validazione: nessun rilancio`)
+      return
+    }
+    if (handoff.status !== 'ready') {
       log($, `handoff del teammate ${short(job.agentId)} cambiato durante la validazione: nessun verdetto applicato`)
+      return
+    }
+    // Riscritto mentre il validatore lavorava: il suo verdetto è su un testo vecchio, si rivalida (stesso giro).
+    if (handoff.id !== job.id) {
+      log($, `handoff del teammate ${short(job.agentId)} cambiato durante la validazione: nuova validazione`)
+      isChanged = true
       return
     }
     const verdict = parseVerdict(answer)
@@ -914,6 +925,7 @@ const concludeValidation = async ($: EngineInterface, validatorId: string, answe
     log($, `handoff del teammate ${short(job.agentId)}: lacune mandate al teammate (giro ${job.round})`)
   } finally {
     checking.delete(job.agentId)
+    if (isChanged) await checkTeammate($, job.agentId)
   }
 }
 
