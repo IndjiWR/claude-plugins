@@ -12,7 +12,9 @@ description: Salva lo stato del lavoro in .claude/handoff/pending/<id della sess
 
    In ogni zona: nessun lavoro in background ancora attivo (subagent, comandi in background, monitor): aspettalo o fermalo. Se in zona dura o nel margine resta lavoro a metà (debug aperto, test rossi, modifica incompleta), l'handoff ha la sezione "Lavoro interrotto".
 2. **Raccogli i fatti, non andare a memoria**: `git status --short`, `git rev-parse --abbrev-ref HEAD`, `git log --oneline -5` e l'esito dei comandi di test/build che citerai. Ciò che non hai verificato in questa sessione va in "Ipotesi da verificare", non in "Stato verificato".
-3. **Scrivi `.claude/handoff/pending/${CLAUDE_SESSION_ID}.md`** nella root del progetto, con il formato qui sotto (punta a 1.000-2.000 token, massimo 9.000 caratteri), `status: draft` e `session: ${CLAUDE_SESSION_ID}`.
+3. **Se sei un agente** (subagent o teammate: la nota della mod indica un file `…--<id agente>.md`), da qui segui la «Variante agente» in fondo, non i passi 3-6: il file `${CLAUDE_SESSION_ID}.md` è della sessione principale.
+
+   **Scrivi `.claude/handoff/pending/${CLAUDE_SESSION_ID}.md`** nella root del progetto, con il formato qui sotto (punta a 1.000-2.000 token, massimo 9.000 caratteri), `status: draft` e `session: ${CLAUDE_SESSION_ID}`.
    - È il file di questa sessione. Nella stessa cartella possono lavorare altre sessioni, ognuna con il suo, e la mod esegue /clear solo nella sessione che l'ha scritto e allega l'handoff alla sessione pulita che la segue.
    - Non scrivere in `.claude/handoff/pending.md` (il file condiviso delle versioni precedenti) né nel file di un'altra sessione.
    - Solo se il percorso qui sopra non contiene un id di sessione, usa quello dell'ultima nota di zona della mod e metti in `session` l'id che compare nel nome di quel file.
@@ -103,7 +105,7 @@ head: <sha corto di HEAD>
 
 ## Variante agente
 
-Vale quando la nota di zona arriva a un subagent o a un teammate (non alla sessione principale) e indica il percorso del file.
+Vale quando la nota di zona arriva a un subagent o a un teammate (non alla sessione principale) e indica il percorso del file. Sostituisce i passi 3-6: un agente non scrive `${CLAUDE_SESSION_ID}.md` (è il file della principale; con `agent:` nel frontmatter la mod lo ignora).
 
 - **File**: quello della nota, `.claude/handoff/pending/<sessione>--<id agente>.md`, non `${CLAUDE_SESSION_ID}.md`. Stesso formato, ma frontmatter `status: ready` (non `draft`) e `agent: <id agente>`.
 - **Teammate**: non lanciare il validatore e non segnare `validated`. Scrivi il file, chiudi il turno con una sola riga: la mod lo valida, ferma il teammate e lo rilancia con lo stesso nome, tipo e modello (non l'effort), dandogli l'handoff come prompt.
