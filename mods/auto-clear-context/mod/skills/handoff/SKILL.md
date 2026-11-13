@@ -69,6 +69,7 @@ head: <sha corto di HEAD>
 - Skill da richiamare: `<plugin:skill>`: <a che punto del flusso; per esempio executing-plans al task 3 del piano>
 - Plugin, server MCP e CLI necessari: <nome>: <a cosa serve; se è spento o non connesso, dillo>
 - Subagent e ruoli: `<tipo di agent>`: <chi fa cosa>
+- Teammate attivi: <nome>: <tipo, compito, a che punto è; la mod li rilancia col loro nome, quindi riportalo esatto>
 - Build e test: <comandi esatti>
 - Convenzioni: <stile, naming>
 
@@ -99,3 +100,12 @@ head: <sha corto di HEAD>
 - Skill, plugin e agent con il **nome esatto** con cui si invocano (`plugin:skill`), solo quelli in uso o necessari per i prossimi passi; "nessuno" se non ce ne sono.
 - I vincoli dati dall'utente (per esempio "niente commit") vanno in "Vincoli dell'utente", parola per parola.
 - "Lavoro interrotto", quando c'è, ha sempre i suoi tre elementi; senza test che falliscono lo dice ("nessuno"). Le ipotesi escluse vanno in "Strade escluse".
+
+## Variante agente
+
+Vale quando la nota di zona arriva a un subagent o a un teammate (non alla sessione principale) e indica il percorso del file.
+
+- **File**: quello della nota, `.claude/handoff/pending/<sessione>--<id agente>.md`, non `${CLAUDE_SESSION_ID}.md`. Stesso formato, ma frontmatter `status: ready` (non `draft`) e `agent: <id agente>`.
+- **Teammate**: non lanciare il validatore e non segnare `validated`. Scrivi il file, chiudi il turno con una sola riga: la mod lo valida, ferma il teammate e lo rilancia con lo stesso nome, tipo e modello (non l'effort), dandogli l'handoff come prompt.
+- **Subagent**: la mod non lo valida. Controlla il file da solo sui punti del validatore e rispondi con una sola riga: `HANDOFF <percorso>: rilancia un subagent <tipo> con prompt «Riprendi dall'handoff <percorso>»`. Chi ti ha lanciato rilancia.
+- Se il compito si chiude in pochi passi, finiscilo e rispondi come al solito. Niente `/clear` dentro un agente.
