@@ -1,14 +1,25 @@
 import { expect, test } from 'claude-code/testing'
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, appendGaps, leadFallback, parseVerdict, pauseNote, setFront } from '../hooks/agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, appendGaps, leadFallback, parseVerdict, pauseNote, setFront } from '../hooks/agents'
 
-const main = { soft: 40, hard: 60, margin: 75 }
+const main = agentLimits(true, 120_000, 150_000)
 const path = '.claude/handoff/pending/s1--a7.md'
 
-test('agentLimits: soglie degli agenti dalla principale', () => {
-  expect(agentLimits(main, 0)).toEqual({ soft: 40, hard: 60, margin: 75 })
-  expect(agentLimits(main, 15)).toEqual({ soft: 15, hard: 35, margin: 50 })
-  expect(agentLimits({ soft: 0, hard: 60, margin: 75 }, 15)).toEqual({ soft: 0, hard: 0, margin: 0 })
-  expect(agentLimits({ soft: 80, hard: 90, margin: 95 }, 0).margin).toBe(95)
+test('agentLimits: token propri, indipendenti dalla principale', () => {
+  expect(agentLimits(true, 120_000, 150_000)).toEqual({ soft: 120_000, hard: 150_000, margin: 180_000 })
+  expect(agentLimits(true, 120_000, 100_000)).toEqual({ soft: 120_000, hard: 150_000, margin: 180_000 })
+  expect(agentLimits(false, 120_000, 150_000)).toEqual({ soft: 0, hard: 0, margin: 0 })
+  expect(agentLimits(true, 0, 150_000)).toEqual({ soft: 0, hard: 0, margin: 0 })
+})
+
+test('agentZoneOf: zone in token', () => {
+  const l = agentLimits(true, 120_000, 150_000)
+  expect([119_999, 120_000, 150_000, 180_000].map(t => agentZoneOf(t, l))).toEqual([0, 1, 2, 3])
+})
+
+test('agentZoneNote: token e soglie in k', () => {
+  expect(agentZoneNote('teammate', 1, 196_526, main, path, 'general-purpose')).toContain(
+    '~197k token (soglie 120k/150k, margine di sicurezza a 180k)',
+  )
 })
 
 test('agentHandoffPath: un file per sessione e agente', () => {
@@ -16,20 +27,20 @@ test('agentHandoffPath: un file per sessione e agente', () => {
 })
 
 test('agentZoneNote: teammate', () => {
-  const note = agentZoneNote('teammate', 1, 45, main, path, 'general-purpose')
+  const note = agentZoneNote('teammate', 1, 125_000, main, path, 'general-purpose')
   expect(note).toContain(path)
   expect(note).toContain('status: ready')
   expect(note).toContain('agent: a7')
   expect(note).toContain('Non lanciare il validatore: lo fa la mod.')
-  expect(agentZoneNote('teammate', 3, 80, main, path, 'general-purpose')).toContain('subito')
+  expect(agentZoneNote('teammate', 3, 190_000, main, path, 'general-purpose')).toContain('subito')
 })
 
 test('agentZoneNote: subagent', () => {
-  const note = agentZoneNote('subagent', 2, 65, main, path, 'Explore')
+  const note = agentZoneNote('subagent', 2, 160_000, main, path, 'Explore')
   expect(note).toContain(`HANDOFF ${path}`)
   expect(note).toContain('Explore')
   expect(note).toContain('status: ready')
-  expect(agentZoneNote('subagent', 3, 80, main, path, 'Explore')).toContain('subito')
+  expect(agentZoneNote('subagent', 3, 190_000, main, path, 'Explore')).toContain('subito')
 })
 
 test('pauseNote: la principale riparte', () => {
@@ -61,4 +72,14 @@ test('agentResume e leadFallback', () => {
   expect(fb).toContain('TaskStop')
   expect(fb).toContain('worker')
   expect(fb).toContain(`Riprendi dall'handoff ${path}`)
+})
+
+test("agentZoneNote: commit dei propri file prima dell'handoff", () => {
+  for (const kind of ['teammate', 'subagent'] as const) {
+    const note = agentZoneNote(kind, 1, 130_000, main, path, 'general-purpose')
+    expect(note).toContain('git add <file>')
+    expect(note).toContain('mai git add -A')
+    expect(note).toContain('non committati')
+  }
+  expect(agentZoneNote('teammate', 1, 130_000, main, path, 'x')).toContain(`HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo`)
 })

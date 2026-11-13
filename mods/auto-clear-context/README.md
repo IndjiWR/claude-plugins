@@ -47,9 +47,9 @@ In the project the mod uses `.claude/handoff/`: `pending/` (one handoff per sess
 
 ### Subagents and teammates
 
-With `agents` on (default), the context of subagents and teammates is monitored too, with the same zones (`agentThreshold` moves the soft one; hard and margin keep the main session's distance). In a zone the agent gets a note and writes its own handoff, `.claude/handoff/pending/<session id>--<agent id>.md`, with `status: ready` and `agent: <id>`. The mod looks the file up by agent id, so it still finds it after a `/clear` of the main session.
+With `agents` on (default), the context of subagents and teammates is monitored too, with zones of their own in absolute tokens, independent of the main session's thresholds (a main soft threshold of 0 still turns them off): soft at `agentSoftTokens` (120k), hard at `agentHardTokens` (150k), safety margin 30k above the hard one. Tokens, not percentages: the plugin API gives only the main session's window, not the agent's, and an agent's cost grows with the tokens per call. In a zone the agent gets a note: it first commits the files it changed, by name (never `git add -A`), or lists the uncommitted ones and why in the handoff; then it writes its own handoff, `.claude/handoff/pending/<session id>--<agent id>.md`, with `status: ready` and `agent: <id>`. The mod looks the file up by agent id, so it still finds it after a `/clear` of the main session.
 
-- **Teammates**: the mod runs the validator, stops the teammate and relaunches it with `$.agent.spawn` (same name, description, type and model) with the handoff as prompt. The host rejects the Agent tool when a plugin calls it, hence the spawn. If `TaskStop` or the spawn is denied, or the relaunched agent is not in the team (no `teammateId`), the mod asks the main session to stop and relaunch.
+- **Teammates**: the mod runs the validator, stops the teammate and relaunches it with `$.agent.spawn` (same name, description, type and model) with the handoff as prompt. The host rejects the Agent tool when a plugin calls it, hence the spawn. If `TaskStop` or the spawn is denied, or the relaunched agent is not in the team (no `teammateId`), the mod asks the main session to stop and relaunch. The teammate's last line says the mod relaunches it: the lead must not tell it to resume on its own. If the handoff is deleted during validation there is no relaunch; if it is rewritten, it is validated again.
 - **Subagents**: not validated by the mod. The agent checks the file itself and its final answer is `HANDOFF <path>: relaunch …`; whoever launched it relaunches.
 - **Main session**: its `/clear` is rechecked at each agent's `turn.complete`. Idle teammates, the mod's validators and the mod's own agents do not hold it back; active agents get a pause note. After 20 minutes of waiting there is only a warning, never a forced clear.
 - Relaunches have their own counter, per teammate name, with the same cap as clears (`maxClearsPerHour` per rolling hour); they do not use up the main session's clears.
@@ -91,7 +91,8 @@ Update with `claude plugin update auto-clear-context`.
 | `threshold` | 40 | 0, or 1–85 and at least 10 below hard | soft zone (%); `0` turns the monitor off |
 | `hardThreshold` | 60 | soft + 10 to 95 | hard zone (%) |
 | `agents` | on | — | monitor subagents and teammates too |
-| `agentThreshold` | 0 | — | soft zone (%) for agents; `0` = same as the main session |
+| `agentSoftTokens` | 120000 | — | agents' soft zone, in tokens; `0` = no zone notes to agents |
+| `agentHardTokens` | 150000 | — | agents' hard zone, in tokens (margin = hard + 30000) |
 | `maxClearsPerHour` | 3 | — | automatic clears per rolling hour, counted across all sessions; `0` disables them; above 20 means no cap (the mod keeps only the last 20 clears) |
 
 The safety margin is always hard + 15, capped at 95%. Only `/soglia` checks the ranges above: values set in `/config` or at install are taken as given, except that the hard threshold in force is raised to at least soft + 10 and capped at 95.
@@ -127,7 +128,7 @@ Claude can read the current usage and zone with the mod's `context_usage` tool, 
 - The git exclude is skipped in worktrees and submodules, where `.git` is a file.
 - The mods API cannot delete files: after the resume a session's file in `.claude/handoff/pending/` stays behind empty (an empty file means nothing pending). Empty files and drafts left by closed sessions pile up there and can be deleted by hand.
 - No `/clear` inside an agent: it is relaunched with a clean context, and a relaunched teammate loses its original `effort`.
-- Agents use the main session's context window, so they share its zones; teammates in a separate pane are not monitored.
+- Agent zones are in absolute tokens, not a share of the agent's own window (the API does not expose it); teammates in a separate pane are not monitored.
 - Claude Code only (terminal and the desktop Code tab); it does not run in claude.ai chats.
 - Organization policies can block personal mods: if `/status` shows "Enterprise managed settings", ask your admin.
 
@@ -231,9 +232,9 @@ Nel progetto la mod usa la cartella `.claude/handoff/`, con `pending/` (un hando
 
 ### Subagent e teammate
 
-Con `agents` attivo (default) la mod monitora anche il contesto di subagent e teammate, con le stesse zone (`agentThreshold`, default 0 = come la principale, sposta la morbida; dura e margine mantengono la distanza della principale). In zona l'agente riceve una nota e scrive il suo handoff, `.claude/handoff/pending/<id sessione>--<id agente>.md`, con `status: ready` e `agent: <id>`. La mod cerca il file per id dell'agente, quindi lo trova anche dopo un `/clear` della principale.
+Con `agents` attivo (default) la mod monitora anche il contesto di subagent e teammate, con zone proprie in token assoluti, indipendenti dalle soglie della principale (con la morbida della principale a 0 si spengono comunque): morbida a `agentSoftTokens` (120k), dura a `agentHardTokens` (150k), margine di sicurezza 30k sopra la dura. Token e non percentuali: l'API dei plugin dà solo la finestra della principale, non quella dell'agente, e il costo di un agente cresce con i token per chiamata. In zona l'agente riceve una nota: prima committa i file che ha modificato, per nome (mai `git add -A`), o elenca nell'handoff quelli non committati e il motivo; poi scrive il suo handoff, `.claude/handoff/pending/<id sessione>--<id agente>.md`, con `status: ready` e `agent: <id>`. La mod cerca il file per id dell'agente, quindi lo trova anche dopo un `/clear` della principale.
 
-- **Teammate**: la mod lancia il validatore, ferma il teammate e lo rilancia con `$.agent.spawn` (stesso nome, descrizione, tipo e modello) con l'handoff come prompt. L'host rifiuta il tool Agent chiamato da un plugin, da qui lo spawn. Se `TaskStop` o lo spawn vengono negati, o il rilanciato non è nel team (nessun `teammateId`), la mod chiede alla sessione principale di fare stop e rilancio.
+- **Teammate**: la mod lancia il validatore, ferma il teammate e lo rilancia con `$.agent.spawn` (stesso nome, descrizione, tipo e modello) con l'handoff come prompt. L'host rifiuta il tool Agent chiamato da un plugin, da qui lo spawn. Se `TaskStop` o lo spawn vengono negati, o il rilanciato non è nel team (nessun `teammateId`), la mod chiede alla sessione principale di fare stop e rilancio. L'ultima riga del teammate dice che lo rilancia la mod: il lead non deve farlo riprendere da solo. Se l'handoff viene cancellato durante la validazione il rilancio salta; se viene riscritto, si valida di nuovo.
 - **Subagent**: la mod non li valida. L'agente controlla il file da solo e risponde `HANDOFF <percorso>: rilancia …`; lo rilancia chi lo ha lanciato.
 - **Sessione principale**: il suo `/clear` si ricontrolla al `turn.complete` di ogni agente. Teammate `idle`, validatori e agenti della mod non lo bloccano; gli agenti attivi ricevono una nota di pausa. Dopo 20 minuti di rinvio c'è solo un avviso, mai un clear forzato.
 - I rilanci hanno un contatore loro, per nome del teammate, con lo stesso tetto dei clear (`maxClearsPerHour` in un'ora); non consumano i clear della principale.
@@ -298,7 +299,7 @@ Il plugin viene letto da quella cartella: non spostarla e non cancellarla.
 - Il pulsante "Ripristina /config" del pannello `/soglia` non funziona ancora: imposta il valore con `/soglia N`.
 - I comandi in background (Bash, monitor) la mod non li vede: la skill fa aspettare o fermare Claude prima dell'handoff.
 - Nessun `/clear` dentro un agente: viene rilanciato a contesto pulito, e il teammate rilanciato perde l'`effort` originale.
-- Gli agenti usano la finestra della sessione principale; i teammate in un pannello separato sono esclusi.
+- Le zone degli agenti sono in token assoluti, non in quota della finestra dell'agente (l'API non la dà); i teammate in un pannello separato sono esclusi.
 - Nei worktree e nei submodule, dove `.git` è un file, l'esclusione da git non viene aggiunta.
 - L'API delle mod non cancella file: dopo la ripresa il file della sessione in `.claude/handoff/pending/` resta vuoto (vuoto vuol dire nessun handoff in attesa). I file vuoti e le bozze delle sessioni chiuse si accumulano lì e si possono cancellare a mano.
 

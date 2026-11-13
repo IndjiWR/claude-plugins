@@ -17,25 +17,38 @@ const NEVER_POINTS = [
   "con una richiesta di permesso o una domanda all'utente in sospeso",
 ].join('; ')
 
-// Soglie di un agente: morbida propria (o quella della principale), dura e
-// margine a distanza come nella principale. Morbida della principale a 0: spento.
-export const agentLimits = (main: Limits, agentThreshold: number): Limits => {
-  if (main.soft <= 0) return { soft: 0, hard: 0, margin: 0 }
-  const soft = agentThreshold > 0 ? agentThreshold : main.soft
-  const hard = Math.min(95, soft + (main.hard - main.soft))
-  return { soft, hard, margin: Math.min(95, hard + 15) }
+// Soglie di un agente in token assoluti, indipendenti dalla principale: dura almeno
+// 30000 sopra la morbida, margine 30000 sopra la dura. Principale spenta o morbida 0: spento.
+const AGENT_GAP = 30_000
+export const agentLimits = (isMainOn: boolean, soft: number, hard: number): Limits => {
+  if (!isMainOn || !(soft > 0)) return { soft: 0, hard: 0, margin: 0 }
+  const realHard = hard > soft ? hard : soft + AGENT_GAP
+  return { soft, hard: realHard, margin: realHard + AGENT_GAP }
 }
+
+export const agentZoneOf = (tokens: number, limits: Limits): 0 | 1 | 2 | 3 => {
+  if (limits.soft <= 0 || tokens < limits.soft) return 0
+  if (tokens >= limits.margin) return 3
+  return tokens >= limits.hard ? 2 : 1
+}
+
+// 196526 -> "197k"
+export const formatK = (tokens: number) => `${Math.round(tokens / 1000)}k`
 
 export const agentHandoffPath = (session: string, agentId: string) => `${HANDOFF_DIR}/pending/${session}--${agentId}.md`
 
 // L'id dell'agente è la parte del nome file dopo "--".
 const agentIdOf = (path: string) => /--([^/]+)\.md$/.exec(path)?.[1] ?? ''
 
-const levels = (limits: Limits) => `${limits.soft}/${limits.hard}%, margine di sicurezza al ${limits.margin}%`
+// Passo fisso: l'agente committa i propri file prima di scrivere l'handoff.
+export const COMMIT_STEP =
+  "Prima di scrivere l'handoff committa i file che hai modificato tu, per nome (git add <file>…; mai git add -A né git add .; mai i file di .claude/handoff/), con un messaggio che dica il punto raggiunto. Se non puoi (test rossi, file in comune con altri, permesso negato, niente repo git), elenca nell'handoff, in «File toccati», i file non committati e il motivo."
+
+const levels = (limits: Limits) => `${formatK(limits.soft)}/${formatK(limits.hard)}, margine di sicurezza a ${formatK(limits.margin)}`
 
 // La nota che la mod allega a un agente quando il suo contesto entra in una zona.
-export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, percent: number, limits: Limits, path: string, type: string): string => {
-  const seen = `La mod auto-clear-context rileva il contesto di questo agente al ${percent}% della finestra (soglie ${levels(limits)})`
+export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, limits: Limits, path: string, type: string): string => {
+  const seen = `La mod auto-clear-context rileva il contesto di questo agente a ~${formatK(tokens)} token (soglie ${levels(limits)})`
   const when =
     zone === 3
       ? "Margine di sicurezza superato: l'handoff è previsto subito, anche fuori dai punti sicuri; il lavoro rimasto a metà va nella sezione «Lavoro interrotto»."
@@ -46,14 +59,16 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, percent: number,
     return [
       `${seen}.`,
       when,
+      COMMIT_STEP,
       `Scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff (stato, decisioni, file toccati, prossimo passo, «Verifica alla ripresa»), con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`,
-      'Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con una sola riga.',
+      `Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con la sola riga «HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo».`,
       'La mod ferma questo teammate e lo rilancia con lo stesso nome, tipo e modello, dandogli l\'handoff come prompt.',
     ].join(' ')
   }
   return [
     `${seen}.`,
     when,
+    COMMIT_STEP,
     'Se il compito si chiude in pochi passi, finiscilo e rispondi come al solito.',
     `Altrimenti scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff, con status: ready e agent: ${agentIdOf(path)} nel frontmatter, e controllalo da solo sui punti del validatore (ripartire dal solo file: obiettivo, decisioni, file, prossimo passo, verifica alla ripresa, nessun riferimento alla conversazione).`,
     `La risposta finale è una sola riga per chi ti ha lanciato: HANDOFF ${path}: rilancia un subagent ${type} con prompt «Riprendi dall'handoff ${path}».`,

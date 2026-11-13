@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, appendGaps, leadFallback, parseVerdict, pauseNote, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, formatK, appendGaps, leadFallback, parseVerdict, pauseNote, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -177,9 +177,8 @@ let deferredId: string | undefined
 let isDeferWarned = false
 // Per agente, l'impronta dell'handoff della principale per cui ha già avuto la nota di pausa.
 const pausedFor = new Map<string, string>()
-// Contesto dell'ultimo passo di ogni agente (turn.step) e finestra della principale, su cui se ne calcola la percentuale.
+// Contesto dell'ultimo passo di ogni agente (turn.step), in token: le zone degli agenti sono in token assoluti.
 const agentTokens = new Map<string, number>()
-let mainWindow: number | undefined
 // Il percorso dell'handoff dato a ogni agente con la prima nota: resta quello anche dopo un /clear della principale.
 const agentPaths = new Map<string, string>()
 // Gli agenti avviati dalla mod (validatori, teammate rilanciati): niente note di zona.
@@ -189,7 +188,7 @@ let agentsEnabled = true
 // (preso in modo sincrono, perché due turn.complete ravvicinati non lancino due validatori);
 // `validating` ricorda per ogni validatore lanciato di chi è, il file e il giro.
 const checking = new Set<string>()
-const validating = new Map<string, { agentId: string; path: string; round: number }>()
+const validating = new Map<string, { agentId: string; path: string; round: number; id: string }>()
 // I giri già fatti per teammate: se il teammate riscrive il file senza `rounds`, il conto non riparte da 0.
 const doneRounds = new Map<string, number>()
 // Rilancio del teammate: tetto orario (come i clear), rilanci in corso e handoff già passati alla principale.
@@ -709,18 +708,13 @@ const findAgentHandoff = async ($: EngineInterface, agentId: string): Promise<Ha
 }
 
 // La nota di zona per un agente, una volta per zona: il suo handoff lo scrive lui.
-const agentZoneContext = async ($: EngineInterface, agentId: string, configured: Pair, agentThreshold: number): Promise<string | undefined> => {
+const agentZoneContext = async ($: EngineInterface, agentId: string, configured: Pair, agentTokensLimits: { soft: number; hard: number }): Promise<string | undefined> => {
   const tokens = agentTokens.get(agentId)
   if (!agentsEnabled || tokens === undefined || ownAgents.has(agentId)) return undefined
-  const limits = agentLimits(await effectiveLimits($, configured), agentThreshold)
+  const isMainOn = (await effectiveLimits($, configured)).soft > 0
+  const limits = agentLimits(isMainOn, agentTokensLimits.soft, agentTokensLimits.hard)
   if (limits.soft <= 0) return undefined
-  if (!(mainWindow !== undefined && mainWindow > 0)) {
-    const window = (await $.session.usage()).context.window
-    if (!(window > 0)) return undefined
-    mainWindow = window
-  }
-  const percent = Math.round((tokens * 100) / mainWindow)
-  const zone = zoneOf(percent, limits)
+  const zone = agentZoneOf(tokens, limits)
   if (zone === 0) return undefined
   const info = await findAgent($, agentId)
   if (info === undefined) return undefined
@@ -728,8 +722,8 @@ const agentZoneContext = async ($: EngineInterface, agentId: string, configured:
   if (!(await markSignaled($, `agent:${agentId}`, zone))) return undefined
   const path = agentPaths.get(agentId) ?? agentHandoffPath(await $.session.id(), agentId)
   agentPaths.set(agentId, path)
-  log($, `agente ${short(agentId)} al ${percent}% (${ZONE_NAMES[zone]}): nota di handoff`)
-  return agentZoneNote(kindOf(info), zone, percent, limits, path, info.type)
+  log($, `agente ${short(agentId)} a ~${formatK(tokens)} token (${ZONE_NAMES[zone]}): nota di handoff`)
+  return agentZoneNote(kindOf(info), zone, tokens, limits, path, info.type)
 }
 
 // Un tool chiamato dalla mod che non è andato a buon fine: il motivo, altrimenti niente.
@@ -880,7 +874,7 @@ const checkTeammate = async ($: EngineInterface, agentId: string) => {
       return
     }
     ownAgents.add(validatorId)
-    validating.set(validatorId, { agentId, path, round })
+    validating.set(validatorId, { agentId, path, round, id: handoff.id })
     isStarted = true
     log($, `handoff del teammate ${short(agentId)} pronto: validatore ${short(validatorId)} (giro ${round})`)
   } finally {
@@ -893,10 +887,21 @@ const concludeValidation = async ($: EngineInterface, validatorId: string, answe
   const job = validating.get(validatorId)
   if (job === undefined) return
   validating.delete(validatorId)
+  let isChanged = false
   try {
     const handoff = await readHandoff($, job.path)
-    if (handoff === undefined || handoff.status !== 'ready') {
+    if (handoff === undefined) {
+      log($, `handoff del teammate ${short(job.agentId)} rimosso durante la validazione: nessun rilancio`)
+      return
+    }
+    if (handoff.status !== 'ready') {
       log($, `handoff del teammate ${short(job.agentId)} cambiato durante la validazione: nessun verdetto applicato`)
+      return
+    }
+    // Riscritto mentre il validatore lavorava: il suo verdetto è su un testo vecchio, si rivalida (stesso giro).
+    if (handoff.id !== job.id) {
+      log($, `handoff del teammate ${short(job.agentId)} cambiato durante la validazione: nuova validazione`)
+      isChanged = true
       return
     }
     const verdict = parseVerdict(answer)
@@ -920,6 +925,7 @@ const concludeValidation = async ($: EngineInterface, validatorId: string, answe
     log($, `handoff del teammate ${short(job.agentId)}: lacune mandate al teammate (giro ${job.round})`)
   } finally {
     checking.delete(job.agentId)
+    if (isChanged) await checkTeammate($, job.agentId)
   }
 }
 
@@ -1020,13 +1026,19 @@ export const register: Register = (on, options) => {
   maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
   maxRestartsPerHour = maxClearsPerHour
   agentsEnabled = options.agents !== false
-  const agentThreshold = Number(options.agentThreshold ?? 0)
+  const tokenOption = (value: unknown, fallback: number) => {
+    const n = Number(value ?? fallback)
+    return Number.isFinite(n) ? n : fallback
+  }
+  const agentTokensLimits = {
+    soft: tokenOption(options.agentSoftTokens, 120_000),
+    hard: tokenOption(options.agentHardTokens, 150_000),
+  }
 
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
     // Il pannello di /soglia, se è aperto, segue l'uso del contesto.
     if (e.changed.includes('context')) $.ui.invalidate('ui.render')
-    mainWindow = e.context.window
     const percent = e.context.percent
     if (percent === undefined) return result
     const limits = await effectiveLimits($, configured)
@@ -1043,7 +1055,7 @@ export const register: Register = (on, options) => {
   on('classic.PostToolUse', async ($, e, next) => {
     const result = await next(e)
     if (e.agent_id !== undefined) {
-      const notes = [await agentZoneContext($, e.agent_id, configured, agentThreshold), await pauseContext($, e.agent_id)].filter(
+      const notes = [await agentZoneContext($, e.agent_id, configured, agentTokensLimits), await pauseContext($, e.agent_id)].filter(
         (note): note is string => note !== undefined,
       )
       return notes.length === 0 ? result : { ...result, additionalContext: [...(result.additionalContext ?? []), ...notes] }
