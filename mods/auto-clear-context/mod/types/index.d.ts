@@ -29,7 +29,7 @@ declare module 'claude-code' {
   interface PluginState {
     'auto-clear-context': {
       thresholdNotice: ThresholdNotice | null
-      /** Per session id: la zona più alta già segnalata a Claude in quella sessione. */
+      /** Per session id (o `agent:<agentId>` per un agente): la zona più alta già segnalata a Claude. */
       signaledZone: StateFamily<ThresholdZone>
       /** Per agentId: l'input dell'Agent che ha avviato il teammate. */
       agentInputs: StateFamily<AgentInput>

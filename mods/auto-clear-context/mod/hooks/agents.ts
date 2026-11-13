@@ -55,7 +55,7 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, percent: number,
     `${seen}.`,
     when,
     'Se il compito si chiude in pochi passi, finiscilo e rispondi come al solito.',
-    `Altrimenti scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff, con status: ready nel frontmatter, e controllalo da solo sui punti del validatore (ripartire dal solo file: obiettivo, decisioni, file, prossimo passo, verifica alla ripresa, nessun riferimento alla conversazione).`,
+    `Altrimenti scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff, con status: ready e agent: ${agentIdOf(path)} nel frontmatter, e controllalo da solo sui punti del validatore (ripartire dal solo file: obiettivo, decisioni, file, prossimo passo, verifica alla ripresa, nessun riferimento alla conversazione).`,
     `La risposta finale è una sola riga per chi ti ha lanciato: HANDOFF ${path}: rilancia un subagent ${type} con prompt «Riprendi dall'handoff ${path}».`,
   ].join(' ')
 }
@@ -107,5 +107,5 @@ export const agentResume = (handoff: string, archived: string) =>
 export const leadFallback = (name: string, path: string, reason: string) =>
   [
     `La mod auto-clear-context non è riuscita a rilanciare da sola il teammate «${name}» (${reason}); il suo handoff è validato in ${path}.`,
-    `Fai così: 1) TaskStop sul teammate ${name}; 2) Agent con lo stesso name «${name}», lo stesso tipo e lo stesso modello, e prompt «Riprendi dall'handoff ${path}».`,
+    `Fai così: 1) TaskStop sul teammate ${name}; 2) Agent con lo stesso name «${name}» nello stesso team, lo stesso tipo e lo stesso modello, e prompt «Riprendi dall'handoff ${path}».`,
   ].join(' ')
