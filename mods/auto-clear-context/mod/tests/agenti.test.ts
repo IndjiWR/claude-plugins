@@ -148,19 +148,19 @@ const step = async ($: Engine, state: { tokens: number | null }, tokens: number 
 
 test('subagent: una nota per zona, col percorso dell handoff', async ($, on) => {
   const state = world(on)
-  const [soft, ...rest] = await step($, state, 450_000)
+  const [soft, ...rest] = await step($, state, 125_000)
   expect(rest.length).toBe(0)
   expect(soft).toContain('s1--a1.md')
   expect(soft).toContain('Zona morbida')
   expect(soft).toContain('general-purpose')
-  expect((await step($, state, 460_000)).length).toBe(0)
-  const [hard] = await step($, state, 650_000)
+  expect((await step($, state, 130_000)).length).toBe(0)
+  const [hard] = await step($, state, 155_000)
   expect(hard).toContain('Zona dura')
 })
 
 test('teammate: la nota chiede status ready e non lancia il validatore', async ($, on) => {
   const state = world(on, [{ id: 'a1', teammateId: 'pose@t', type: 'general-purpose', description: 'x', status: 'running' }])
-  const [note] = await step($, state, 450_000)
+  const [note] = await step($, state, 125_000)
   expect(note).toContain('s1--a1.md')
   expect(note).toContain('status: ready')
   expect(note).toContain('Non lanciare il validatore')
@@ -168,22 +168,22 @@ test('teammate: la nota chiede status ready e non lancia il validatore', async (
 
 test('dopo un /clear della principale (id nuovo) l agente tiene percorso e zone già segnalate', async ($, on) => {
   const state = world(on)
-  const [first] = await step($, state, 450_000)
+  const [first] = await step($, state, 125_000)
   expect(first).toContain('.claude/handoff/pending/s1--a1.md')
   state.session = 's2'
-  expect((await step($, state, 450_000)).length).toBe(0)
-  const [hard] = await step($, state, 650_000)
+  expect((await step($, state, 125_000)).length).toBe(0)
+  const [hard] = await step($, state, 155_000)
   expect(hard).toContain('.claude/handoff/pending/s1--a1.md')
 })
 
 test('subagent breve: sotto la morbida nessuna nota', async ($, on) => {
   const state = world(on)
-  expect((await step($, state, 300_000)).length).toBe(0)
+  expect((await step($, state, 100_000)).length).toBe(0)
 })
 
 test('agente assente da agent.list: nessuna nota', async ($, on) => {
   const state = world(on)
-  expect((await step($, state, 450_000, 'zz')).length).toBe(0)
+  expect((await step($, state, 125_000, 'zz')).length).toBe(0)
 })
 
 test('turn.step senza usage: nessuna nota, nessun errore', async ($, on) => {
@@ -193,24 +193,36 @@ test('turn.step senza usage: nessuna nota, nessun errore', async ($, on) => {
 
 test('opzione agents false: nessuna nota', { options: { agents: false } }, async ($, on) => {
   const state = world(on)
-  expect((await step($, state, 450_000)).length).toBe(0)
+  expect((await step($, state, 125_000)).length).toBe(0)
 })
 
-test('agentThreshold: la morbida degli agenti è la loro', { options: { agentThreshold: 15 } }, async ($, on) => {
+test('soglie di default in token: 119k niente, 125k zona morbida', async ($, on) => {
+  const state = world(on)
+  expect((await step($, state, 119_000)).length).toBe(0)
+  const [note] = await step($, state, 125_000)
+  expect(note).toContain('Zona morbida')
+})
+
+test('soglie degli agenti indipendenti dalla principale', { options: { threshold: 20 } }, async ($, on) => {
   const state = world(on)
   const [note] = await step($, state, 160_000)
-  expect(note).toContain('Zona morbida')
-  expect(note).toContain('soglie 15/35%')
+  expect(note).toContain('Zona dura')
+})
+
+test('agentSoftTokens/agentHardTokens: soglie proprie', { options: { agentSoftTokens: 50000, agentHardTokens: 80000 } }, async ($, on) => {
+  const state = world(on)
+  const [note] = await step($, state, 60_000)
+  expect(note).toContain('soglie 50k/80k')
 })
 
 test('monitor spento (morbida 0): nessuna nota agli agenti', { options: { threshold: 0 } }, async ($, on) => {
   const state = world(on)
-  expect((await step($, state, 450_000)).length).toBe(0)
+  expect((await step($, state, 125_000)).length).toBe(0)
 })
 
 test('la principale senza agent_id non riceve note dai passi degli agenti', async ($, on) => {
   const state = world(on)
-  state.tokens = 450_000
+  state.tokens = 125_000
   const it = $.turn.step(stepInput('a1'))
   while (!(await it.next()).done);
   const result = await $.classic.PostToolUse(after)
@@ -314,7 +326,7 @@ test('il validatore non riceve note di zona: sta in ownAgents', async ($, on) =>
   const state = world(on, teammate)
   state.files.set(FILE, ready())
   await turnEnd($, 'a1')
-  expect((await step($, state, 450_000, 'v1')).length).toBe(0)
+  expect((await step($, state, 125_000, 'v1')).length).toBe(0)
 })
 
 test('validatore annullato: il turno successivo del teammate rilancia la validazione, stesso giro', async ($, on) => {
@@ -406,7 +418,7 @@ test('il teammate rilanciato torna sotto il monitor, il validatore no; le mappe 
   const state = world(on, list)
   await launched($, state)
   // Contesto alto di a1 registrato dal turn.step, senza che la nota sia ancora uscita.
-  state.tokens = 450_000
+  state.tokens = 125_000
   const it = $.turn.step(stepInput('a1'))
   while (!(await it.next()).done);
   await validate($, state)
@@ -415,9 +427,9 @@ test('il teammate rilanciato torna sotto il monitor, il validatore no; le mappe 
   expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
   // Il nuovo teammate è in elenco e viene misurato; il validatore resta escluso.
   list.push({ id: 'a2', teammateId: 'pose@t', type: 'general-purpose', description: 'posa', status: 'running' })
-  const [note] = await step($, state, 450_000, 'a2')
+  const [note] = await step($, state, 125_000, 'a2')
   expect(note).toContain('s1--a2.md')
-  expect((await step($, state, 450_000, 'v1')).length).toBe(0)
+  expect((await step($, state, 125_000, 'v1')).length).toBe(0)
 })
 
 test('lo stesso handoff non si rilancia due volte', async ($, on) => {

@@ -29,11 +29,17 @@
       "description": "Se attivo, anche il contesto di subagent e teammate è monitorato: vicino alle soglie ricevono la nota per scrivere un handoff.",
       "default": true
     },
-    "agentThreshold": {
+    "agentSoftTokens": {
       "type": "number",
-      "title": "Soglia morbida degli agenti (%)",
-      "description": "Soglia morbida per subagent e teammate; dura e margine seguono la distanza della principale. 0 usa la soglia morbida della principale.",
-      "default": 0
+      "title": "Soglia morbida degli agenti (token)",
+      "description": "Token di contesto di un subagent o teammate oltre i quali riceve la nota per scrivere l'handoff. 0 spegne il monitor degli agenti.",
+      "default": 120000
+    },
+    "agentHardTokens": {
+      "type": "number",
+      "title": "Soglia dura degli agenti (token)",
+      "description": "Token oltre i quali l'handoff è previsto al primo punto sicuro; il margine di sicurezza è 30000 sopra. Se non supera la morbida vale morbida + 30000.",
+      "default": 150000
     }
   }
 }
