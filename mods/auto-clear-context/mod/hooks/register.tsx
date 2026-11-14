@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage, Timer } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, formatK, appendGaps, isStale, leadFallback, parseVerdict, pauseNote, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, formatK, appendGaps, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -330,6 +330,18 @@ const archive = async ($: EngineInterface, handoff: Handoff) => {
   const archived = await archiveCopy($, handoff)
   await $.fs.write(handoff.path, '')
   return archived
+}
+
+// Un Agent riuscito che riprende l'handoff di un subagent: il file passa in archive/ con status: resumed.
+const archiveResumed = async ($: EngineInterface, prompt: string | undefined) => {
+  const path = resumedHandoff(prompt ?? '')
+  if (path === undefined) return
+  const { root } = await paths($)
+  const handoff = await readHandoff($, `${root}/${path}`)
+  if (handoff === undefined) return
+  const archived = await archive($, { ...handoff, text: setFront(handoff.text, { status: 'resumed' }) })
+  const agentId = /--([^/]+)\.md$/.exec(path)?.[1] ?? ''
+  log($, `handoff dell'agente ${short(agentId)} ripreso: archiviato in ${archived}`)
 }
 
 const runClear = ($: EngineInterface, canRetry: boolean) => {
@@ -1137,6 +1149,10 @@ export const register: Register = (on, options) => {
   // Un teammate avviato dal tool Agent: se ne tiene l'input, per rilanciarlo uguale. Solo osservazione.
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     const result = await next(e)
+    // Lo spawn è già avvenuto: gli errori dell'archiviazione restano nel log (mai un secondo next).
+    if (result.deny === undefined) {
+      await archiveResumed($, e.prompt).catch((error: unknown) => log($, `handoff ripreso non archiviato: ${errorText(error)}`))
+    }
     const record = result.result as { status?: string; agentId?: string; agent_id?: string } | undefined
     if (record?.status !== 'teammate_spawned') return result
     const agentId = record.agentId ?? record.agent_id

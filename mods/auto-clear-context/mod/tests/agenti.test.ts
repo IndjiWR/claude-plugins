@@ -835,3 +835,54 @@ test('timer con la principale in un turno: niente clear, parte alla sua fine tur
   await settled()
   expect(state.commands).toEqual(['clear'])
 })
+
+// Handoff di un subagent ripreso dalla principale con un nuovo Agent.
+const SUB_FILE = '.claude/handoff/pending/s1--a7.md'
+const resumeCall = (path: string) =>
+  ({ tool: 'Agent', subagent_type: 'general-purpose', description: 'ripresa', prompt: `Riprendi dall'handoff ${path} (repo C:/progetto)` }) as never
+const resumedLogs = (state: { logs: string[] }) => state.logs.filter(line => line.includes('ripreso: archiviato in'))
+
+test("Agent con «Riprendi dall'handoff» di un subagent: pending vuoto, copia in archive con status resumed, una riga di log", async ($, on) => {
+  const state = world(on)
+  state.files.set(SUB_FILE, ready().replace('agent: a1', 'agent: a7'))
+  const result = await $.tool.call(resumeCall(SUB_FILE))
+  await settled()
+  expect(result.deny).toBeUndefined()
+  expect(state.agentCalls).toBe(1)
+  expect(state.files.get(SUB_FILE)).toBe('')
+  const [copy, ...rest] = archived(state)
+  expect(rest.length).toBe(0)
+  expect(state.files.get(copy ?? '')).toContain('status: resumed')
+  expect(state.files.get(copy ?? '')).toContain('Fare x.')
+  const lines = resumedLogs(state)
+  expect(lines.length).toBe(1)
+  expect(lines[0]).toContain(`handoff dell'agente a7 ripreso: archiviato in ${copy}`)
+})
+
+test("Agent rifiutato (deny): l'handoff resta in pending", async ($, on) => {
+  const state = world(on)
+  const text = ready().replace('agent: a1', 'agent: a7')
+  state.files.set(SUB_FILE, text)
+  state.denied.set('Agent', 'no')
+  const result = await $.tool.call(resumeCall(SUB_FILE))
+  await settled()
+  expect(result.deny).toBeDefined()
+  expect(state.agentCalls).toBe(1)
+  expect(state.files.get(SUB_FILE)).toBe(text)
+  expect(archived(state)).toEqual([])
+  expect(resumedLogs(state)).toEqual([])
+})
+
+test('prompt con handoff della principale o file inesistente: nessuna archiviazione, nessun errore', async ($, on) => {
+  const state = world(on)
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  const main = await $.tool.call(resumeCall(MAIN_FILE))
+  const missing = await $.tool.call(resumeCall('.claude/handoff/pending/s1--zz.md'))
+  await settled()
+  expect(main.deny).toBeUndefined()
+  expect(missing.deny).toBeUndefined()
+  expect(state.agentCalls).toBe(2)
+  expect(state.files.get(MAIN_FILE)).toBe(MAIN_VALIDATED)
+  expect(archived(state)).toEqual([])
+  expect(resumedLogs(state)).toEqual([])
+})
