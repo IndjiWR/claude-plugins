@@ -1175,7 +1175,6 @@ export const register: Register = (on, options) => {
     return result
   })
 
-
   // Streaming: i pezzi passano intatti; si legge solo l'usage del passo di un agente.
   on('turn.step', async function* ($, e, next) {
     await markSeen($, e.agentId)
@@ -1274,7 +1273,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', ($, e, next) => {
-    if (e.reason === 'clear') attachFor = { owner: e.sessionId, source: 'clear' }
+    attachFor = e.reason === 'clear' ? { owner: e.sessionId, source: 'clear' } : undefined
     if (e.reason === 'clear' && isClearRequested) {
       isClearRequested = false
       pendingNote = undefined

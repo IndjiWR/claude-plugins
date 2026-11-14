@@ -241,6 +241,29 @@ test("dopo un /clear un comando non consuma l'allegato: lo porta il primo prompt
   expect(((await $.prompt.submit(typed('ciao'))).context ?? []).join('\n')).toContain('Riprendere dopo il comando.')
 })
 
+test("dopo un /clear e un /resume di un'altra sessione, il primo prompt di B non riceve l'handoff di A", async ($, on) => {
+  const state = world(on)
+  state.files.set(pendingOf('A'), handoff('di A', 'A'))
+  await $.session.end({ reason: 'clear', sessionId: 'A', resume: { id: 'A' } })
+  await $.session.end({ reason: 'resume', sessionId: 'A2', resume: { id: 'B' } })
+  state.session = 'B'
+  expect(((await $.prompt.submit(typed('ciao'))).context ?? []).join('\n')).not.toContain('Riprendere di A.')
+  expect(state.files.get(pendingOf('A'))).toBe(handoff('di A', 'A'))
+  expect(archived(state).length).toBe(0)
+})
+
+test("dopo un compact e un /resume di un'altra sessione, il primo prompt di B non riceve l'handoff di A", async ($, on) => {
+  const state = world(on)
+  state.files.set(pendingOf('A'), handoff('di A', 'A'))
+  state.session = 'A'
+  await $.session.compact({ trigger: 'manual', messages: summary })
+  await $.session.end({ reason: 'resume', sessionId: 'A', resume: { id: 'B' } })
+  state.session = 'B'
+  expect(((await $.prompt.submit(typed('ciao'))).context ?? []).join('\n')).not.toContain('Riprendere di A.')
+  expect(state.files.get(pendingOf('A'))).toBe(handoff('di A', 'A'))
+  expect(archived(state).length).toBe(0)
+})
+
 test("compact di un agente o rifiutato: nessun allegato, l'handoff resta", async ($, on) => {
   const state = world(on)
   state.files.set(pendingOf('A'), handoff('intatto', 'A'))
