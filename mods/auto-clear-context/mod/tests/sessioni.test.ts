@@ -27,6 +27,9 @@ const handoff = (title: string, session?: string) =>
     `Riprendere ${title}.`,
   ].join('\n')
 
+// Il transcript minimo di un compact.
+const summary = [{ role: 'user' as const, text: 'riassunto', toolUses: [] }]
+
 const typed = (text: string): PromptSubmitInput => ({ text, wait: false, origin: { kind: 'composer' } })
 
 // Su macOS/Linux una radice "C:/…" non è assoluta e il motore le antepone la
@@ -46,6 +49,7 @@ const world = (on: On) => {
     prompts: [] as PromptSubmitInput[],
     commands: [] as string[],
     logs: [] as string[],
+    compactSkip: undefined as string | undefined,
   }
   on('session.root', () => ({ value: ROOT }))
   on('session.id', () => ({ value: state.session }))
@@ -74,7 +78,8 @@ const world = (on: On) => {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
-  on('classic.SessionStart', () => ({}))
+  // Il fondo del compact: riuscito, o rifiutato con `compactSkip`.
+  on('session.compact', () => (state.compactSkip === undefined ? { messages: summary } : { skip: state.compactSkip }))
   return state
 }
 
@@ -96,12 +101,21 @@ const endTurn = async ($: Engine, state: World, session: string) => {
   return state.commands.length > before
 }
 
-// Un /clear nella sessione `from`, che riparte come `to`: il testo che
-// SessionStart allega.
+// Un /clear nella sessione `from`, che riparte come `to`: il context del primo
+// prompt dopo il clear (la ripresa della mod, se l'ha chiesto, altrimenti uno scritto).
 const clear = async ($: Engine, state: World, from: string, to: string) => {
+  const before = state.prompts.length
   await $.session.end({ reason: 'clear', sessionId: from, resume: { id: from } })
   state.session = to
-  return ((await $.classic.SessionStart({ source: 'clear' })).additionalContext ?? []).join('\n')
+  await settle($, () => state.prompts.length > before)
+  if (state.prompts.length === before) await $.prompt.submit(typed('ciao'))
+  return (state.prompts[before]?.context ?? []).join('\n')
+}
+
+// Un compact della sessione corrente (o di un agente), poi un prompt: il suo context.
+const compact = async ($: Engine, agentId?: string) => {
+  await $.session.compact({ trigger: 'manual', messages: summary, ...(agentId === undefined ? {} : { agentId }) })
+  return ((await $.prompt.submit(typed('continua'))).context ?? []).join('\n')
 }
 
 const resumes = (state: World) => state.prompts.filter(prompt => prompt.origin.kind === 'plugin')
@@ -159,7 +173,7 @@ test("un pending.md del formato vecchio senza session non fa /clear né ripresa 
   expect(await endTurn($, state, 'B')).toBe(false)
   expect(await clear($, state, 'B', 'B2')).not.toContain('Riprendere vecchio.')
   state.session = 'A'
-  expect(((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []).join('\n')).not.toContain('Riprendere vecchio.')
+  expect(await compact($)).not.toContain('Riprendere vecchio.')
 
   expect(state.files.get(LEGACY)).toBe(handoff('vecchio'))
   expect(archived(state).length).toBe(0)
@@ -194,14 +208,48 @@ test("dopo un compact si allega solo l'handoff della sessione compattata", async
   state.files.set(pendingOf('A'), handoff('portfolio', 'A'))
 
   state.session = 'B'
-  const inB = await $.classic.SessionStart({ source: 'compact' })
-  expect((inB.additionalContext ?? []).join('\n')).not.toContain('portfolio')
+  expect(await compact($)).not.toContain('portfolio')
   expect(state.files.get(pendingOf('A'))).toBe(handoff('portfolio', 'A'))
 
   state.session = 'A'
-  const inA = await $.classic.SessionStart({ source: 'compact' })
-  expect((inA.additionalContext ?? []).join('\n')).toContain('Riprendere portfolio.')
+  expect(await compact($)).toContain('Riprendere portfolio.')
   expect(state.files.get(pendingOf('A'))).toBe('')
+  expect(state.logs.some(line => line.includes('allegato alla sessione (compact) e archiviato'))).toBe(true)
+  // Allegato una volta sola.
+  expect(((await $.prompt.submit(typed('ancora'))).context ?? []).join('\n')).not.toContain('portfolio')
+})
+
+test("un /clear dell'utente (non chiesto dalla mod) allega l'handoff validato al primo prompt", async ($, on) => {
+  const state = world(on)
+  state.files.set(pendingOf('A'), handoff('a mano', 'A'))
+
+  expect(await clear($, state, 'A', 'A2')).toContain('Riprendere a mano.')
+  expect(state.files.get(pendingOf('A'))).toBe('')
+  expect(archived(state).length).toBe(1)
+  expect(state.logs.some(line => line.includes('allegato alla sessione (clear) e archiviato'))).toBe(true)
+  expect(resumes(state).length).toBe(0)
+})
+
+test("dopo un /clear un comando non consuma l'allegato: lo porta il primo prompt scritto", async ($, on) => {
+  const state = world(on)
+  state.files.set(pendingOf('A'), handoff('dopo il comando', 'A'))
+  await $.session.end({ reason: 'clear', sessionId: 'A', resume: { id: 'A' } })
+  state.session = 'A2'
+  const command = await $.prompt.submit({ ...typed('/model'), command: { name: 'model', args: '' } } as never)
+  expect((command.context ?? []).join('\n')).not.toContain('dopo il comando')
+  expect(state.files.get(pendingOf('A'))).toBe(handoff('dopo il comando', 'A'))
+  expect(((await $.prompt.submit(typed('ciao'))).context ?? []).join('\n')).toContain('Riprendere dopo il comando.')
+})
+
+test("compact di un agente o rifiutato: nessun allegato, l'handoff resta", async ($, on) => {
+  const state = world(on)
+  state.files.set(pendingOf('A'), handoff('intatto', 'A'))
+
+  expect(await compact($, 'agente-1')).not.toContain('intatto')
+  state.compactSkip = 'no'
+  expect(await compact($)).not.toContain('intatto')
+  expect(state.files.get(pendingOf('A'))).toBe(handoff('intatto', 'A'))
+  expect(archived(state).length).toBe(0)
 })
 
 test('la nota di zona indica il file di handoff della sessione', async ($, on) => {

@@ -7,6 +7,8 @@ const TOOL = 'mcp__auto-clear-context__context_usage'
 const typed = (text: string): PromptSubmitInput => ({ text, wait: false, origin: { kind: 'composer' } })
 
 const bash = { tool: 'Bash', command: 'ls' } as never
+// Il transcript minimo di un compact.
+const summary = [{ role: 'user' as const, text: 'riassunto', toolUses: [] }]
 
 // Il mondo sotto il monitor: una sessione (l'id cambia come dopo un /clear), il
 // contesto letto da $.session.usage, lo store, il clock e il fondo di misure,
@@ -14,6 +16,7 @@ const bash = { tool: 'Bash', command: 'ls' } as never
 const world = (on: On) => {
   mock.store(on)
   const clock = mock.clock(on, { now: 1_000_000 })
+  const logs: string[] = []
   const state = {
     session: 's1',
     percent: undefined as number | undefined,
@@ -38,12 +41,15 @@ const world = (on: On) => {
   on('fs.read', (_, e) => ({ deny: `ENOENT ${e.path}` }))
   on('fs.write', () => ({ value: undefined }))
   on('fs.stat', (_, e) => ({ deny: `ENOENT ${e.path}` }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_, e) => {
+    logs.push((e as unknown as { text: string }).text)
+    return { value: undefined }
+  })
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('prompt.submit', (_, e) => ({ text: e.text, context: e.context, origin: e.origin }))
   on('tool.call', () => (state.denied === undefined ? { result: 'ok' } : { deny: state.denied }) as never)
-  on('classic.SessionStart', () => ({}))
-  return { state, clock }
+  on('session.compact', () => ({ messages: summary }))
+  return { state, clock, logs }
 }
 
 const at = (percent: number) => ({ context: { window: 100, tokens: percent, percent }, rateLimits: [], changed: ['context' as const] })
@@ -207,13 +213,34 @@ test('un plugin prepend che salta i classic non toglie la nota durante il turno'
   expect((await viaTool($, clock, 45, state)).join(' ')).toContain('zona morbida')
 })
 
+test('compact di un agente o precompute: le zone della principale restano segnalate', async ($, on) => {
+  world(on)
+  expect((await viaPrompt($, 62)).join(' ')).toContain('zona dura')
+  await $.session.compact({ trigger: 'auto', agentId: 'a1', messages: summary })
+  expect((await viaPrompt($, 63)).length).toBe(0)
+  // Un precompute non installa nulla: neanche lui azzera.
+  await $.session.compact({ trigger: 'precompute', messages: summary })
+  expect((await viaPrompt($, 63)).length).toBe(0)
+})
+
+test('contesto sceso sotto la morbida senza compact visto: le zone tornano da segnalare', async ($, on) => {
+  const { logs } = world(on)
+  // Sotto la morbida senza nulla di segnalato: nessun azzeramento.
+  expect((await viaPrompt($, 20)).length).toBe(0)
+  expect(logs.filter(line => line.includes('sceso sotto la morbida')).length).toBe(0)
+  expect((await viaPrompt($, 62)).join(' ')).toContain('zona dura')
+  expect((await viaPrompt($, 20)).length).toBe(0)
+  expect(logs.filter(line => line.includes('contesto sceso sotto la morbida: le zone tornano da segnalare')).length).toBe(1)
+  expect((await viaPrompt($, 45)).join(' ')).toContain('zona morbida')
+})
+
 test('dopo un compact (stessa sessione) le zone ripartono e la nota in attesa decade', async ($, on) => {
   world(on)
 
   expect((await viaPrompt($, 62)).join(' ')).toContain('zona dura')
   // Una misura mette in attesa il margine, poi il compact riporta giù il contesto.
   await $.session.measure(at(80))
-  await $.classic.SessionStart({ source: 'compact' })
+  await $.session.compact({ trigger: 'auto', messages: summary })
   expect(((await $.prompt.submit(typed('continua'))).context ?? []).length).toBe(0)
 
   // Stessa sessione: la morbida torna a essere segnalata, una volta sola.

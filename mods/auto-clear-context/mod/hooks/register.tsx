@@ -22,9 +22,9 @@ import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, Thres
 // sessioni possono lavorare nella stessa cartella. Il pending.md condiviso delle
 // versioni precedenti vale solo se il suo frontmatter porta l'id della sessione.
 // Clear: turn.complete con l'handoff della sessione in stato "validated".
-// Ripresa: session.end (clear) invia il prompt di ripresa; classic.SessionStart
-// allega e archivia l'handoff validato della sessione appena chiusa dal /clear
-// (o di quella compattata), mai quello di un'altra.
+// Ripresa: session.end (clear) invia il prompt di ripresa; il primo prompt dopo il
+// /clear (o dopo un session.compact) allega e archivia l'handoff validato della
+// sessione appena chiusa dal /clear (o di quella compattata), mai quello di un'altra.
 // Soglie: /soglia apre un pannello (valore in modifica, preset e −5/+5),
 // /soglia 45 imposta la morbida, /soglia 45 65 morbida e dura. Con le righe di
 // /config la scrittura va nelle impostazioni e il motore ricarica il modulo con
@@ -205,9 +205,10 @@ const restarting = new Set<string>()
 const handedToLead = new Set<string>()
 const VALIDATOR = 'auto-clear-context:handoff-validator'
 const AGENT_INPUTS = { plugin: 'auto-clear-context', key: 'agentInputs' } as const
-// La sessione che l'ultimo /clear ha chiuso: SessionStart (clear) allega il suo
-// handoff, perché la sessione nuova ha già un altro id.
-let clearedSession: string | undefined
+// Dopo un /clear (la sessione che ha chiuso, perché la nuova ha già un altro id) o un
+// compact (la sessione stessa): di chi è l'handoff che il prossimo prompt allega.
+type AttachFor = { owner: string; source: 'clear' | 'compact' }
+let attachFor: AttachFor | undefined
 // Gli handoff che non sono della sessione già segnalati nel log, per impronta.
 const reported = new Set<string>()
 let isExcludeChecked = false
@@ -331,6 +332,21 @@ const archive = async ($: EngineInterface, handoff: Handoff) => {
   const archived = await archiveCopy($, handoff)
   await $.fs.write(handoff.path, '')
   return archived
+}
+
+// L'handoff validato di `attach.owner`, archiviato, nel testo da allegare al prompt;
+// niente se non c'è o non è validato. Gli errori restano nel log: il prompt parte lo stesso.
+const attachedHandoff = async ($: EngineInterface, attach: AttachFor): Promise<string | undefined> => {
+  try {
+    const handoff = await readOwnHandoff($, attach.owner)
+    if (handoff?.status !== 'validated') return undefined
+    const archived = await archive($, handoff)
+    log($, `handoff ${handoff.id} della sessione ${short(attach.owner)} allegato alla sessione (${attach.source}) e archiviato in ${archived}`)
+    return attached(handoff, archived)
+  } catch (error) {
+    log($, `handoff della sessione ${short(attach.owner)} non allegato: ${errorText(error)}`)
+    return undefined
+  }
 }
 
 // Un Agent riuscito che riprende l'handoff di un subagent: il file resta in pending/ col suo testo (l'agente
@@ -1142,8 +1158,16 @@ export const register: Register = (on, options) => {
     if (percent === undefined) return result
     const limits = await effectiveLimits($, configured)
     const zone = zoneOf(percent, limits)
-    if (zone === 0) return result
     const session = await $.session.id()
+    if (zone === 0) {
+      // Riserva del hook session.compact, se un plugin più esterno lo salta: il contesto
+      // tornato sotto la morbida dopo una zona segnalata vuol dire un compact.
+      if ((await readSignaled($, session)) > 0) {
+        await resetSignaled($)
+        log($, 'contesto sceso sotto la morbida: le zone tornano da segnalare')
+      }
+      return result
+    }
     if (zone <= (await readSignaled($, session))) return result
     if (pendingNote?.session === session && pendingNote.zone >= zone) return result
     pendingNote = { session, zone, text: await buildNote($, zone, percent, limits, session) }
@@ -1190,14 +1214,26 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => next(e))
 
+  // Il primo prompt dopo un /clear o un compact (la ripresa della mod o uno dell'utente,
+  // non un comando) porta l'handoff validato; ogni prompt la nota di zona in attesa.
   on('prompt.submit', async ($, e, next) => {
-    if (pendingNote === undefined) return next(e)
+    const context = [...(e.context ?? [])]
+    const attach = attachFor
+    if (attach !== undefined && e.command === undefined) {
+      attachFor = undefined
+      const text = await attachedHandoff($, attach)
+      if (text !== undefined) context.push(text)
+    }
     const note = pendingNote
-    pendingNote = undefined
-    const session = await $.session.id()
-    if (note.session !== session || !(await markSignaled($, session, note.zone))) return next(e)
-    log($, `${ZONE_NAMES[note.zone]} segnalata a Claude insieme al prompt`)
-    return next({ ...e, context: [...(e.context ?? []), note.text] })
+    if (note !== undefined) {
+      pendingNote = undefined
+      const session = await $.session.id()
+      if (note.session === session && (await markSignaled($, session, note.zone))) {
+        log($, `${ZONE_NAMES[note.zone]} segnalata a Claude insieme al prompt`)
+        context.push(note.text)
+      }
+    }
+    return context.length === (e.context?.length ?? 0) ? next(e) : next({ ...e, context })
   }).catch(($, e, next) => next(e))
 
   // La principale in un turno: il clear aspetta la sua fine turno, anche se un agente si ferma prima.
@@ -1238,7 +1274,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', ($, e, next) => {
-    if (e.reason === 'clear') clearedSession = e.sessionId
+    if (e.reason === 'clear') attachFor = { owner: e.sessionId, source: 'clear' }
     if (e.reason === 'clear' && isClearRequested) {
       isClearRequested = false
       pendingNote = undefined
@@ -1254,23 +1290,19 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('classic.SessionStart', async ($, e, next) => {
+  // Un compact riuscito della principale: stessa sessione, contesto di nuovo basso. Le zone
+  // ripartono e il prossimo prompt allega l'handoff validato della sessione.
+  on('session.compact', async ($, e, next) => {
     const result = await next(e)
-    if (e.source !== 'clear' && e.source !== 'compact') return result
-    if (e.source === 'compact') {
+    if (e.agentId !== undefined || e.trigger === 'precompute' || result.skip !== undefined) return result
+    try {
       await orElse(resetSignaled($), undefined)
       log($, 'compact: le zone tornano da segnalare in questa sessione')
+      attachFor = { owner: await $.session.id(), source: 'compact' }
+    } catch (error) {
+      log($, `compact non registrato: ${errorText(error)}`)
     }
-    // Dopo un /clear l'handoff è della sessione che il clear ha chiuso; dopo un
-    // compact della sessione stessa.
-    const owner = e.source === 'clear' ? clearedSession : await $.session.id()
-    clearedSession = undefined
-    if (owner === undefined) return result
-    const handoff = await readOwnHandoff($, owner)
-    if (handoff?.status !== 'validated') return result
-    const archived = await archive($, handoff)
-    log($, `handoff ${handoff.id} della sessione ${short(owner)} allegato alla sessione (${e.source}) e archiviato in ${archived}`)
-    return { ...result, additionalContext: [...(result.additionalContext ?? []), attached(handoff, archived)] }
+    return result
   }).catch(($, e, next) => next(e))
 
   // /soglia e il tool context_usage: registrati a ogni caricamento del modulo,
