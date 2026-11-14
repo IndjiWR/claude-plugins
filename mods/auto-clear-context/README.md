@@ -134,6 +134,7 @@ Claude can read the current usage and zone with the mod's `context_usage` tool, 
 - No `/clear` inside an agent: it is relaunched with a clean context, and a relaunched teammate loses its original `effort`.
 - Agent zones are in absolute tokens, not a share of the agent's own window (the API does not expose it); teammates in a separate pane are not monitored.
 - Claude Code only (terminal and the desktop Code tab); it does not run in claude.ai chats.
+- A user-tier mod does not run under the `classic.*` hooks that the managed tier skips (`next.to`, as `cc-plugin-sec-default@builtin` does in Team organizations). Since 0.8.0 the mod uses native events only: notes during the turn go on `tool.call`, the handoff attachment on the first `prompt.submit` after a clear or a compaction.
 - Organization policies can block personal mods: if `/status` shows "Enterprise managed settings", ask your admin.
 
 ### Early-access mods API
@@ -158,12 +159,11 @@ One TypeScript/TSX hooks module on the mods API:
 
 | Event | Role |
 | --- | --- |
-| `session.measure`, `classic.PostToolUse` | watch context usage after each turn and during long turns |
-| `prompt.submit` | attaches the zone note to the next prompt |
+| `session.measure`, `tool.call` | watch context usage after each turn; `tool.call` delivers the zone notes during long turns (`result.context`) |
+| `prompt.submit` | attaches the zone note, and after a clear or a compaction the validated handoff (archived afterwards), to the next prompt |
 | `turn.complete` | checks the session's own handoff, the caps and running subagents, then runs `/clear` |
 | `session.end` | remembers which session the clear closed and submits the resume prompt |
-| `classic.SessionStart` | attaches the validated handoff of the session the clear closed (or of the compacted one) and archives it |
-| `session.start`, `command.run`, `ui.render`, `tool.call` | register and serve `/soglia`, its panel and `context_usage` |
+| `session.start`, `command.run`, `ui.render`, `tool.call` | register and serve `/soglia`, its panel and `context_usage` (the same `tool.call` also carries the notes) |
 
 Zone flags live in `$.state` and are written with `ifVersion`, so the two monitor channels never signal the same zone twice. A two-value threshold change parks its second write in `$.state`, so it survives the module reload that a `/config` write triggers. The tests use the official `claude-code/testing` kit and render the `/soglia` panel on both the terminal and the desktop surface.
 
@@ -307,6 +307,7 @@ Il plugin viene letto da quella cartella: non spostarla e non cancellarla.
 - Nessun `/clear` dentro un agente: viene rilanciato a contesto pulito, e il teammate rilanciato perde l'`effort` originale.
 - Le zone degli agenti sono in token assoluti, non in quota della finestra dell'agente (l'API non la dà); i teammate in un pannello separato sono esclusi.
 - Un agente in attesa (`waiting`) di un suo lavoro in background (Bash, monitor) per più di `agentStaleMinutes` conta come fermo e il clear può partire.
+- Una mod del tier user non gira sotto i hook `classic.*` che il tier gestito salta (`next.to`, come fa `cc-plugin-sec-default@builtin` nelle organizzazioni Team). Dalla 0.8.0 la mod usa solo eventi nativi: le note durante il turno stanno su `tool.call`, l'allegato dell'handoff sul primo `prompt.submit` dopo un clear o un compact.
 - Nei worktree e nei submodule, dove `.git` è un file, l'esclusione da git non viene aggiunta.
 - L'API delle mod non cancella file: dopo la ripresa il file della sessione in `.claude/handoff/pending/` resta vuoto (vuoto vuol dire nessun handoff in attesa). Restano anche i file `status: resumed` dei subagent, con il loro contenuto. I file vuoti, quelli `resumed` e le bozze delle sessioni chiuse si accumulano lì e si possono cancellare a mano.
 
