@@ -31,7 +31,7 @@ The mod nudges, it does not force: it adds a note to Claude's context once per z
 | Hard | from 60% | 600k | finish the atomic action in progress and hand off at the first safe point, recording unfinished work under "Lavoro interrotto" (interrupted work) |
 | Safety margin | from 75% (hard + 15) | 750k | hand off immediately, even with work half done |
 
-Each zone is signalled at most once per session (only the highest one if usage jumps past several), either with the next prompt or mid-turn, checked after tool calls at most every 30 s. After a compact the zones re-arm, and if auto-compact fires before the clear, the session's validated handoff is attached to the compacted session instead. A typical cycle in the transcript (values illustrative):
+Each zone is signalled at most once per session (only the highest one if usage jumps past several), either with the next prompt or mid-turn, checked after tool calls at most every 30 s. After a compact the zones re-arm, and if auto-compact fires before the clear, the session's validated handoff is attached to the compacted session with its next prompt instead. A typical cycle in the transcript (values illustrative):
 
 ```text
 auto-clear-context: contesto al 41% (zona morbida, soglie 40/60/75%): la nota parte con il prossimo prompt
@@ -59,7 +59,7 @@ With `agents` on (default), the context of subagents and teammates is monitored 
 
 Each session writes its handoff to its own file, `.claude/handoff/pending/<session id>.md`, with `session: <session id>` in the frontmatter. The skill gets the id from `${CLAUDE_SESSION_ID}`, and the zone note names the same path. At the end of a turn the mod looks only at the current session's handoff, so a session never clears because another one validated its own. After a `/clear` it attaches only the handoff of the session that the clear closed. Two sessions can hand off at the same time without overwriting each other.
 
-A validated handoff stays in its file if its session is closed before the clear (for example while the hourly cap holds the clear back). No other session takes it over. While that session is still open, a manual `/clear` there attaches the handoff (without the resume prompt); otherwise resume it by hand by asking Claude to read the file. A draft left behind can only be resumed by hand.
+A validated handoff stays in its file if its session is closed before the clear (for example while the hourly cap holds the clear back). No other session takes it over. While that session is still open, a manual `/clear` there attaches the handoff to its first prompt (without the resume prompt); otherwise resume it by hand by asking Claude to read the file. A draft left behind can only be resumed by hand.
 
 Handoffs written by earlier versions in the shared `.claude/handoff/pending.md` are used only when their frontmatter carries `session:` with the id of the session that reads them. Without that field the file belongs to no session: none clears or resumes from it, it stays where it is, and the log says so once. Resume it by hand or delete it.
 
@@ -159,7 +159,8 @@ One TypeScript/TSX hooks module on the mods API:
 
 | Event | Role |
 | --- | --- |
-| `session.measure`, `tool.call` | watch context usage after each turn; `tool.call` delivers the zone notes during long turns (`result.context`) |
+| `session.measure`, `tool.call` | watch context usage after each turn (`session.measure` also re-arms the zones when usage falls back below the soft threshold); `tool.call` delivers the zone notes during long turns (`result.context`) |
+| `session.compact` | re-arms the zones and queues the session's validated handoff for the next prompt |
 | `prompt.submit` | attaches the zone note, and after a clear or a compaction the validated handoff (archived afterwards), to the next prompt |
 | `turn.complete` | checks the session's own handoff, the caps and running subagents, then runs `/clear` |
 | `session.end` | remembers which session the clear closed and submits the resume prompt |
@@ -220,7 +221,7 @@ Dopo l'handoff validato, a fine turno la mod esegue `/clear`, allega l'handoff a
 
 **Più sessioni nella stessa cartella.** Ognuna scrive il suo handoff in `.claude/handoff/pending/<id della sessione>.md`, con `session: <id della sessione>` nel frontmatter. La skill prende l'id da `${CLAUDE_SESSION_ID}` e la nota di zona riporta lo stesso percorso. A fine turno la mod guarda solo l'handoff della sessione, quindi una sessione non fa mai `/clear` per l'handoff validato di un'altra; dopo il `/clear` allega solo l'handoff della sessione che il clear ha chiuso.
 
-Se la sessione si chiude prima del clear (per esempio mentre il limite orario lo trattiene), l'handoff validato resta nel suo file e nessun'altra sessione lo prende. Finché quella sessione è aperta, un `/clear` a mano lì allega l'handoff (senza il prompt di ripresa); altrimenti chiedi a Claude di leggere quel file. Una bozza rimasta lì si riprende solo a mano.
+Se la sessione si chiude prima del clear (per esempio mentre il limite orario lo trattiene), l'handoff validato resta nel suo file e nessun'altra sessione lo prende. Finché quella sessione è aperta, un `/clear` a mano lì allega l'handoff al primo prompt (senza il prompt di ripresa); altrimenti chiedi a Claude di leggere quel file. Una bozza rimasta lì si riprende solo a mano.
 
 Gli handoff delle versioni precedenti, nel `.claude/handoff/pending.md` condiviso, valgono solo se il frontmatter porta `session:` con l'id della sessione che li legge. Senza quel campo il file non è di nessuna sessione: nessuna fa `/clear` né riprende da lì, il file resta dov'è e il log lo segnala una volta. Riprendilo a mano o cancellalo.
 
