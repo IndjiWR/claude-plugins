@@ -843,23 +843,25 @@ test('timer con la principale in un turno: niente clear, parte alla sua fine tur
 const SUB_FILE = '.claude/handoff/pending/s1--a7.md'
 const resumeCall = (path: string) =>
   ({ tool: 'Agent', subagent_type: 'general-purpose', description: 'ripresa', prompt: `Riprendi dall'handoff ${path} (repo C:/progetto)` }) as never
-const resumedLogs = (state: { logs: string[] }) => state.logs.filter(line => line.includes('ripreso: archiviato in'))
+const resumedLogs = (state: { logs: string[] }) => state.logs.filter(line => line.includes('ripreso: segnato resumed'))
 
-test("Agent con «Riprendi dall'handoff» di un subagent: pending vuoto, copia in archive con status resumed, una riga di log", async ($, on) => {
+// Il file in pending/ resta leggibile (il subagent ripreso può leggerlo dopo che next si risolve), segnato resumed.
+test("Agent con «Riprendi dall'handoff» di un subagent: pending segnato resumed col suo testo, copia in archive, una riga di log", async ($, on) => {
   const state = world(on)
   state.files.set(SUB_FILE, ready().replace('agent: a1', 'agent: a7'))
   const result = await $.tool.call(resumeCall(SUB_FILE))
   await settled()
   expect(result.deny).toBeUndefined()
   expect(state.agentCalls).toBe(1)
-  expect(state.files.get(SUB_FILE)).toBe('')
+  expect(state.files.get(SUB_FILE)).toContain('status: resumed')
+  expect(state.files.get(SUB_FILE)).toContain('Fare x.')
   const [copy, ...rest] = archived(state)
   expect(rest.length).toBe(0)
   expect(state.files.get(copy ?? '')).toContain('status: resumed')
   expect(state.files.get(copy ?? '')).toContain('Fare x.')
   const lines = resumedLogs(state)
   expect(lines.length).toBe(1)
-  expect(lines[0]).toContain(`handoff dell'agente a7 ripreso: archiviato in ${copy}`)
+  expect(lines[0]).toContain(`handoff dell'agente a7 ripreso: segnato resumed, copia in ${copy}`)
 })
 
 test("Agent rifiutato (deny): l'handoff resta in pending", async ($, on) => {
