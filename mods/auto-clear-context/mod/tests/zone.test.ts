@@ -6,15 +6,21 @@ const TOOL = 'mcp__auto-clear-context__context_usage'
 
 const typed = (text: string): PromptSubmitInput => ({ text, wait: false, origin: { kind: 'composer' } })
 
-const after = { tool_name: 'Bash', tool_input: {}, tool_response: {}, tool_use_id: 'u1' } as const
+const bash = { tool: 'Bash', command: 'ls' } as never
 
 // Il mondo sotto il monitor: una sessione (l'id cambia come dopo un /clear), il
 // contesto letto da $.session.usage, lo store, il clock e il fondo di misure,
-// prompt e PostToolUse. `breakdown` è quello che /context darebbe con un breakdown.
+// prompt e tool. `breakdown` è quello che /context darebbe con un breakdown.
 const world = (on: On) => {
   mock.store(on)
   const clock = mock.clock(on, { now: 1_000_000 })
-  const state = { session: 's1', percent: undefined as number | undefined, breakdown: undefined as SessionContextBreakdown | undefined }
+  const state = {
+    session: 's1',
+    percent: undefined as number | undefined,
+    breakdown: undefined as SessionContextBreakdown | undefined,
+    // Se impostato, il fondo di tool.call rifiuta il tool con questo motivo.
+    denied: undefined as string | undefined,
+  }
   on('session.id', () => ({ value: state.session }))
   on('session.root', () => ({ value: 'C:/progetto' }))
   on('session.usage', (_, e) => ({
@@ -35,7 +41,7 @@ const world = (on: On) => {
   on('ui.log', () => ({ value: undefined }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('prompt.submit', (_, e) => ({ text: e.text, context: e.context, origin: e.origin }))
-  on('classic.PostToolUse', () => ({}))
+  on('tool.call', () => (state.denied === undefined ? { result: 'ok' } : { deny: state.denied }) as never)
   on('classic.SessionStart', () => ({}))
   return { state, clock }
 }
@@ -48,11 +54,11 @@ const viaPrompt = async ($: Engine, percent: number) => {
   return (await $.prompt.submit(typed('continua'))).context ?? []
 }
 
-// Le note che un PostToolUse porta, 30 s dopo il precedente.
+// Le note che un tool porta nel suo context, 30 s dopo il precedente.
 const viaTool = async ($: Engine, clock: { advance: (ms: number) => Promise<void> }, percent: number, state: { percent?: number }) => {
   state.percent = percent
   await clock.advance(30_000)
-  return (await $.classic.PostToolUse(after)).additionalContext ?? []
+  return (await $.tool.call(bash)).context ?? []
 }
 
 test('col prossimo prompt: una nota per zona per sessione, morbida → dura → margine; un nuovo session id riparte', async ($, on) => {
@@ -104,7 +110,7 @@ test('col prossimo prompt: dal normale alla dura parte solo la nota della dura, 
   expect(margin).toContain('margine di sicurezza superato')
 })
 
-test('durante il turno (PostToolUse): una nota per zona per sessione, una lettura ogni 30 s al massimo', async ($, on) => {
+test('durante il turno (tool.call): una nota per zona per sessione, una lettura ogni 30 s al massimo', async ($, on) => {
   const { state, clock } = world(on)
 
   expect(await viaTool($, clock, 30, state)).toEqual([])
@@ -115,7 +121,7 @@ test('durante il turno (PostToolUse): una nota per zona per sessione, una lettur
   // Dieci secondi dopo non si legge: la dura aspetta il prossimo controllo.
   state.percent = 62
   await clock.advance(10_000)
-  expect((await $.classic.PostToolUse(after)).additionalContext ?? []).toEqual([])
+  expect((await $.tool.call(bash)).context ?? []).toEqual([])
   const [hard] = await viaTool($, clock, 62, state)
   expect(hard).toContain('al 62% della finestra: zona dura')
   expect(await viaTool($, clock, 63, state)).toEqual([])
@@ -134,14 +140,71 @@ test('durante il turno (PostToolUse): una nota per zona per sessione, una lettur
 test('i due canali si coordinano: una zona segnalata da uno non si ripete sull\'altro', async ($, on) => {
   const { state, clock } = world(on)
 
-  // La misura mette in attesa la morbida; il PostToolUse la porta prima del prompt.
+  // La misura mette in attesa la morbida; il tool la porta prima del prompt.
   await $.session.measure(at(45))
   expect((await viaTool($, clock, 45, state)).join(' ')).toContain('zona morbida')
   expect(((await $.prompt.submit(typed('continua'))).context ?? []).length).toBe(0)
 
-  // La dura arriva col prompt; il PostToolUse dopo non la ripete.
+  // La dura arriva col prompt; il tool dopo non la ripete.
   expect((await viaPrompt($, 62)).join(' ')).toContain('zona dura')
   expect(await viaTool($, clock, 62, state)).toEqual([])
+})
+
+test('tool rifiutato: il deny passa intatto, nessuna nota, la zona resta da segnalare', async ($, on) => {
+  const { state, clock } = world(on)
+  state.denied = 'vietato'
+  state.percent = 45
+  await clock.advance(30_000)
+  const result = await $.tool.call(bash)
+  expect(result.deny).toBe('vietato')
+  expect(result.context).toBe(undefined)
+  state.denied = undefined
+  expect((await viaTool($, clock, 45, state)).join(' ')).toContain('zona morbida')
+})
+
+test('il tool context_usage non porta note di zona: una riga sola, nessuna nota doppia', async ($, on) => {
+  const { state, clock } = world(on)
+  state.percent = 45
+  await clock.advance(30_000)
+  const result = await $.tool.call({ tool: TOOL })
+  expect(result.result).toBe('45% · zona morbida (40/60%)')
+  expect(result.context ?? []).toEqual([])
+  expect((await viaTool($, clock, 45, state)).join(' ')).toContain('zona morbida')
+})
+
+// Un altro plugin che chiama un tool da sé (all'inizio di ogni turno): il modello non legge quel context.
+const caller = {
+  name: 'chiamante',
+  register: (on: On) => {
+    on('turn.start', async ($, e, next) => {
+      await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+      return next(e)
+    })
+  },
+}
+
+test('tool.call di un plugin: nessun errore e la zona non si consuma lì', { plugins: [caller] }, async ($, on) => {
+  const { state, clock } = world(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  state.percent = 45
+  await clock.advance(30_000)
+  await $.turn.start({ turnId: 't1' } as never)
+  expect((await viaTool($, clock, 45, state)).join(' ')).toContain('zona morbida')
+})
+
+// Come cc-plugin-sec-default nel tier gestito: sui classic salta tutto il tier user.
+const managed = {
+  name: 'gestito',
+  tier: 'prepend' as const,
+  register: (on: On) => {
+    on('classic.PostToolUse', ($, e, next) => next.to(e, 'core'))
+    on('classic.SessionStart', ($, e, next) => next.to(e, 'core'))
+  },
+}
+
+test('un plugin prepend che salta i classic non toglie la nota durante il turno', { plugins: [managed] }, async ($, on) => {
+  const { state, clock } = world(on)
+  expect((await viaTool($, clock, 45, state)).join(' ')).toContain('zona morbida')
 })
 
 test('dopo un compact (stessa sessione) le zone ripartono e la nota in attesa decade', async ($, on) => {

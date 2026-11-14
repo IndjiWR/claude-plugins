@@ -13,8 +13,8 @@ import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, Thres
 // punto sicuro) e margine di sicurezza, dura + 15 (subito). La dura in vigore
 // sta almeno 10 punti sopra la morbida; morbida 0 spegne il monitor.
 // Monitor: session.measure dopo ogni turno (nota allegata al prossimo prompt) e
-// classic.PostToolUse durante i turni lunghi (una lettura ogni CHECK_EVERY_MS al
-// massimo); una nota per zona per sessione, la zona già segnalata in $.state.
+// tool.call durante i turni lunghi, nel context del risultato (una lettura ogni
+// CHECK_EVERY_MS al massimo); una nota per zona per sessione, la zona già segnalata in $.state.
 // Dopo un compact (stessa sessione, contesto di nuovo basso) le zone ripartono.
 // Tool context_usage (mcp__auto-clear-context__context_usage): percentuale e zona
 // su richiesta, in una riga.
@@ -747,6 +747,35 @@ const agentZoneContext = async ($: EngineInterface, agentId: string, configured:
   return agentZoneNote(kindOf(info), zone, tokens, limits, path, info.type)
 }
 
+// Le note durante il turno, dopo il risultato di un tool: a un agente la sua zona e la
+// pausa, alla principale la zona letta al massimo ogni CHECK_EVERY_MS.
+const turnNotes = async (
+  $: EngineInterface,
+  agentId: string | undefined,
+  configured: Pair,
+  agentTokensLimits: { soft: number; hard: number },
+): Promise<string[]> => {
+  if (agentId !== undefined) {
+    return [await agentZoneContext($, agentId, configured, agentTokensLimits), await pauseContext($, agentId)].filter(
+      (note): note is string => note !== undefined,
+    )
+  }
+  const now = await $.clock.now()
+  if (now - lastCheckAt < CHECK_EVERY_MS) return []
+  lastCheckAt = now
+  const limits = await effectiveLimits($, configured)
+  if (limits.soft <= 0) return []
+  const { percent } = (await $.session.usage()).context
+  if (percent === undefined) return []
+  const zone = zoneOf(percent, limits)
+  if (zone === 0) return []
+  const session = await $.session.id()
+  if (!(await markSignaled($, session, zone))) return []
+  if (pendingNote?.session === session && pendingNote.zone <= zone) pendingNote = undefined
+  log($, `contesto al ${percent}% (${ZONE_NAMES[zone]}) durante il turno: segnalato a Claude`)
+  return [await buildNote($, zone, percent, limits, session)]
+}
+
 // Un tool chiamato dalla mod che non è andato a buon fine: il motivo, altrimenti niente.
 const refusalOf = (outcome: { deny?: string; isError?: boolean; text?: string }) =>
   outcome.deny ?? (outcome.isError === true ? (outcome.text ?? 'errore del tool') : undefined)
@@ -1122,30 +1151,6 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  on('classic.PostToolUse', async ($, e, next) => {
-    await markSeen($, e.agent_id)
-    const result = await next(e)
-    if (e.agent_id !== undefined) {
-      const notes = [await agentZoneContext($, e.agent_id, configured, agentTokensLimits), await pauseContext($, e.agent_id)].filter(
-        (note): note is string => note !== undefined,
-      )
-      return notes.length === 0 ? result : { ...result, additionalContext: [...(result.additionalContext ?? []), ...notes] }
-    }
-    const now = await $.clock.now()
-    if (now - lastCheckAt < CHECK_EVERY_MS) return result
-    lastCheckAt = now
-    const limits = await effectiveLimits($, configured)
-    if (limits.soft <= 0) return result
-    const { percent } = (await $.session.usage()).context
-    if (percent === undefined) return result
-    const zone = zoneOf(percent, limits)
-    if (zone === 0) return result
-    const session = await $.session.id()
-    if (!(await markSignaled($, session, zone))) return result
-    if (pendingNote?.session === session && pendingNote.zone <= zone) pendingNote = undefined
-    log($, `contesto al ${percent}% (${ZONE_NAMES[zone]}) durante il turno: segnalato a Claude`)
-    return { ...result, additionalContext: [...(result.additionalContext ?? []), await buildNote($, zone, percent, limits, session)] }
-  }).catch(($, e, next) => next(e))
 
   // Streaming: i pezzi passano intatti; si legge solo l'usage del passo di un agente.
   on('turn.step', async function* ($, e, next) {
@@ -1293,6 +1298,24 @@ export const register: Register = (on, options) => {
     const [usage, limits] = await Promise.all([readUsage($), effectiveLimits($, configured)])
     return { result: usageLine(usage, limits) }
   }).catch(() => ({ result: 'contesto non disponibile: la lettura della mod non è riuscita' }))
+
+  // Ogni tool, dopo i hook con matcher (context_usage risponde da sé e non arriva qui): le
+  // note durante il turno nel context del risultato, un promemoria che il modello legge dopo
+  // il risultato come quello di PostToolUse. Niente note su un deny né sui tool chiamati da
+  // un plugin, il cui context il modello non legge. Il tool è già eseguito: dopo next nessun
+  // errore esce.
+  on('tool.call', async ($, e, next) => {
+    await orElse(markSeen($, e.agentId), undefined)
+    const result = await next(e)
+    if (result.deny !== undefined || next.origin.plugin !== 'engine') return result
+    try {
+      const notes = await turnNotes($, e.agentId, configured, agentTokensLimits)
+      return notes.length === 0 ? result : { ...result, context: [...(result.context ?? []), ...notes] }
+    } catch (error) {
+      log($, `note durante il turno non controllate: ${errorText(error)}`)
+      return result
+    }
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'soglia' }, async ($, e) => {
     const text = e.args.trim()
