@@ -980,9 +980,13 @@ const markSeen = async ($: EngineInterface, agentId: string | undefined) => {
 }
 
 // Un solo timer alla scadenza più vicina tra gli agenti che trattengono il clear: allo scadere si ricontrolla.
-const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now: number) => {
+const cancelStaleCheck = () => {
   staleTimer?.cancel()
   staleTimer = undefined
+}
+
+const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now: number) => {
+  cancelStaleCheck()
   if (!(agentStaleMinutes > 0)) return
   const due = Math.min(...busy.map(agent => (lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000))
   staleTimer = $.clock.after(Math.max(1, due - now), () => {
@@ -996,8 +1000,7 @@ const resetDeferral = () => {
   deferredId = undefined
   isDeferWarned = false
   pausedFor.clear()
-  staleTimer?.cancel()
-  staleTimer = undefined
+  cancelStaleCheck()
 }
 
 // Dopo 20 minuti di rinvio, un avviso una volta sola: il clear non si forza, perché l'effetto di /clear
@@ -1038,10 +1041,12 @@ const tryClear = async ($: EngineInterface, reason: string, ending?: string) => 
     const now = await $.clock.now()
     const clears = ((await $.store.get(CLEARS_KEY)) as ClearRecord[] | undefined) ?? []
     if (clears.some(clear => clear.handoff === handoff.id)) {
+      cancelStaleCheck()
       log($, `l'handoff ${handoff.id} ha già avuto il suo clear: nessun nuovo clear`)
       return
     }
     if (clears.filter(clear => now - clear.at < HOUR_MS).length >= maxClearsPerHour) {
+      cancelStaleCheck()
       log($, `limite di ${maxClearsPerHour} clear in un'ora raggiunto: l'handoff ${handoff.id} resta in attesa`)
       return
     }

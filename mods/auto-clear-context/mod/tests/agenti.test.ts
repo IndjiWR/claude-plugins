@@ -24,8 +24,12 @@ const stepInput = (agentId?: string) => ({ turnId: 't', index: 0, model: 'm', me
 
 // Il mondo sotto il monitor: una principale con finestra da 1M, l'elenco degli
 // agenti e il fondo di turn.step che risponde con l'usage di `state.tokens`.
-const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-purpose', description: 'x', status: 'running' }]) => {
-  mock.store(on)
+const world = (
+  on: On,
+  agents: readonly object[] = [{ id: 'a1', type: 'general-purpose', description: 'x', status: 'running' }],
+  store: Record<string, unknown> = {},
+) => {
+  mock.store(on, store)
   const clock = mock.clock(on, { now: 1_000_000 })
   const state = {
     clock,
@@ -984,6 +988,34 @@ test('dopo il clear e session.end il timer non resta armato', async ($, on) => {
   expect(state.commands).toEqual(['clear'])
   await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } } as never)
   await settled()
+  const before = mainReads(state)
+  await state.clock.advance(31 * 60_000)
+  await settled()
+  expect(mainReads(state)).toBe(before)
+})
+
+// L'id che la mod dà a un handoff (FNV-1a a 32 bit più la lunghezza, come fingerprint in register.tsx).
+const handoffId = (text: string) => {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `${hash.toString(16).padStart(8, '0')}${text.length.toString(16)}`
+}
+
+test("handoff che ha già avuto il suo clear durante il rinvio: il timer della scadenza è cancellato", async ($, on) => {
+  // Il rinvio arma il timer con un handoff; poi la principale lo riscrive con uno che ha già avuto il suo clear.
+  const other = MAIN_VALIDATED.replace('Fare y.', 'Fare z.')
+  const state = world(on, twoRunning(), { clears: [{ at: 0, handoff: handoffId(other) }] })
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.logs.some(line => line.includes('clear rimandato'))).toBe(true)
+  state.files.set(MAIN_FILE, other)
+  await $.turn.complete(done('a2'))
+  await settled()
+  expect(state.logs.filter(line => line.includes('ha già avuto il suo clear')).length).toBe(1)
   const before = mainReads(state)
   await state.clock.advance(31 * 60_000)
   await settled()
