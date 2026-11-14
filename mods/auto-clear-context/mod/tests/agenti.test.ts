@@ -53,6 +53,8 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     // Ogni tool.call che arriva al fondo, in ordine; `denied` rifiuta il tool con quel motivo.
     toolCalls: [] as Record<string, unknown>[],
     denied: new Map<string, string>(),
+    // Tool che finiscono con isError (senza deny).
+    errored: new Set<string>(),
     prompts: [] as string[],
   }
   on('session.id', () => ({ value: state.session }))
@@ -102,6 +104,7 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     if (state.throws.has(e.tool)) throw new Error(`${e.tool} è esploso`)
     const denial = state.denied.get(e.tool)
     if (denial !== undefined) return { deny: denial } as never
+    if (state.errored.has(e.tool)) return { result: undefined, isError: true, text: 'spawn fallito' } as never
     return { result: state.agentRecord, text: 'ok' } as never
   })
   on('prompt.submit', (_, e) => {
@@ -883,6 +886,20 @@ test('prompt con handoff della principale o file inesistente: nessuna archiviazi
   expect(missing.deny).toBeUndefined()
   expect(state.agentCalls).toBe(2)
   expect(state.files.get(MAIN_FILE)).toBe(MAIN_VALIDATED)
+  expect(archived(state)).toEqual([])
+  expect(resumedLogs(state)).toEqual([])
+})
+
+test("Agent finito con isError: l'handoff resta in pending con status ready", async ($, on) => {
+  const state = world(on)
+  const text = ready().replace('agent: a1', 'agent: a7')
+  state.files.set(SUB_FILE, text)
+  state.errored.add('Agent')
+  const result = await $.tool.call(resumeCall(SUB_FILE))
+  await settled()
+  expect(result.isError).toBe(true)
+  expect(state.agentCalls).toBe(1)
+  expect(state.files.get(SUB_FILE)).toBe(text)
   expect(archived(state)).toEqual([])
   expect(resumedLogs(state)).toEqual([])
 })

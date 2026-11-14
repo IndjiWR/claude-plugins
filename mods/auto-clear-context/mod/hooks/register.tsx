@@ -1150,7 +1150,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     const result = await next(e)
     // Lo spawn è già avvenuto: gli errori dell'archiviazione restano nel log (mai un secondo next).
-    if (result.deny === undefined) {
+    if (result.deny === undefined && result.isError !== true) {
       await archiveResumed($, e.prompt).catch((error: unknown) => log($, `handoff ripreso non archiviato: ${errorText(error)}`))
     }
     const record = result.result as { status?: string; agentId?: string; agent_id?: string } | undefined
