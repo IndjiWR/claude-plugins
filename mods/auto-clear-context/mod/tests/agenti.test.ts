@@ -1032,3 +1032,13 @@ test('teammate in pannello separato (id === teammateId), running senza eventi pe
   expect(state.commands).toEqual([])
   expect(staleLogs(state)).toEqual([])
 })
+
+test('agentStaleMinutes enorme: limitato a 1440 minuti', { options: { agentStaleMinutes: 100_000 } }, async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(1440 * 60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})

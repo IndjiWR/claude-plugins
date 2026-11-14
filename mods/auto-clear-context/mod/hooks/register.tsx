@@ -181,6 +181,7 @@ const pausedFor = new Map<string, string>()
 // un agente dato attivo non trattiene più il clear. 0 spegne la scadenza.
 const lastSeen = new Map<string, number>()
 const staleLogged = new Set<string>()
+const MAX_STALE_MINUTES = 1440
 let agentStaleMinutes = 30
 let staleTimer: Timer | undefined
 // Contesto dell'ultimo passo di ogni agente (turn.step), in token: le zone degli agenti sono in token assoluti.
@@ -1094,7 +1095,7 @@ export const register: Register = (on, options) => {
   maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
   maxRestartsPerHour = maxClearsPerHour
   agentsEnabled = options.agents !== false
-  agentStaleMinutes = Number(options.agentStaleMinutes ?? 30)
+  agentStaleMinutes = Math.min(Number(options.agentStaleMinutes ?? 30), MAX_STALE_MINUTES)
   const tokenOption = (value: unknown, fallback: number) => {
     const n = Number(value ?? fallback)
     return Number.isFinite(n) ? n : fallback
