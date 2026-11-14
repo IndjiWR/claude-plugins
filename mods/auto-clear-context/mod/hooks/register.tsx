@@ -951,12 +951,16 @@ const concludeValidation = async ($: EngineInterface, validatorId: string, answe
 
 // Gli agenti che trattengono il clear: pending/running/waiting. Un teammate idle, i validatori e gli agenti
 // avviati dalla mod non contano, né `ending`, l'agente al suo turn.complete (la lista può dirlo ancora running).
+const isPanelTeammate = (agent: AgentInfo) => agent.teammateId !== undefined && agent.id === agent.teammateId
+
 const activeAgents = async ($: EngineInterface, ending?: string) => {
   const busy = (await orElse($.agent.list(), [] as readonly AgentInfo[])).filter(
     agent => BUSY.includes(agent.status) && !ownAgents.has(agent.id) && agent.type !== VALIDATOR && agent.id !== ending,
   )
   const now = await $.clock.now()
   return busy.filter(agent => {
+    // Teammate in un pannello separato: il suo ciclo non gira qui, nessun evento; conta solo l'elenco.
+    if (isPanelTeammate(agent)) return true
     const seen = lastSeen.get(agent.id)
     if (seen === undefined) {
       lastSeen.set(agent.id, now)
@@ -987,7 +991,9 @@ const cancelStaleCheck = () => {
 const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now: number) => {
   cancelStaleCheck()
   if (!(agentStaleMinutes > 0)) return
-  const due = Math.min(...busy.map(agent => (lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000))
+  const expiring = busy.filter(agent => !isPanelTeammate(agent))
+  if (expiring.length === 0) return
+  const due = Math.min(...expiring.map(agent => (lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000))
   staleTimer = $.clock.after(Math.max(1, due - now), () => {
     staleTimer = undefined
     tryClear($, 'agenti senza attività').catch((error: unknown) => log($, `clear non controllato: ${errorText(error)}`))

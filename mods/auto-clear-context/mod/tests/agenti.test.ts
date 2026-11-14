@@ -1021,3 +1021,14 @@ test("handoff che ha già avuto il suo clear durante il rinvio: il timer della s
   await settled()
   expect(mainReads(state)).toBe(before)
 })
+
+test('teammate in pannello separato (id === teammateId), running senza eventi per 60 minuti: nessun clear', async ($, on) => {
+  const state = world(on, [{ id: 'w@t', teammateId: 'w@t', type: 'teammate', description: 'x', status: 'running' }, validator('v1')])
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(60 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  expect(staleLogs(state)).toEqual([])
+})
