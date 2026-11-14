@@ -96,4 +96,5 @@ test("resumedHandoff: percorso dell'handoff di un subagent ripreso", () => {
   expect(resumedHandoff("Riprendi dall'handoff /Users/x/p/.claude/handoff/pending/s1--a7.md (repo /x)")).toEqual(found)
   expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1.md")).toBe(undefined)
   expect(resumedHandoff('Fai qualcosa di diverso')).toBe(undefined)
+  expect(resumedHandoff('riprendi dall’handoff .claude/handoff/pending/s1--a7.md')).toEqual(found)
 })

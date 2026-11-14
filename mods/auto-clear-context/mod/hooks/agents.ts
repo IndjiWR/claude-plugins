@@ -132,7 +132,7 @@ export const isStale = (lastSeen: number, now: number, minutes: number): boolean
 // Il percorso e l'id dell'agente dell'handoff di un subagent in un prompt «Riprendi dall'handoff …»;
 // undefined se manca o se è l'handoff di una principale (nome file senza "--").
 export const resumedHandoff = (prompt: string): { path: string; agentId: string } | undefined => {
-  const path = /Riprendi dall'handoff\s+\S*?(\.claude\/handoff\/pending\/[^\s/]+\.md)/.exec(prompt)?.[1]
+  const path = /Riprendi dall['’]handoff\s+\S*?(\.claude\/handoff\/pending\/[^\s/]+\.md)/i.exec(prompt)?.[1]
   const agentId = path === undefined ? '' : agentIdOf(path)
   return path !== undefined && agentId !== '' ? { path, agentId } : undefined
 }
