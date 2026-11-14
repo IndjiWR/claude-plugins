@@ -31,7 +31,7 @@ The mod nudges, it does not force: it adds a note to Claude's context once per z
 | Hard | from 60% | 600k | finish the atomic action in progress and hand off at the first safe point, recording unfinished work under "Lavoro interrotto" (interrupted work) |
 | Safety margin | from 75% (hard + 15) | 750k | hand off immediately, even with work half done |
 
-Each zone is signalled at most once per session (only the highest one if usage jumps past several), either with the next prompt or mid-turn, checked after tool calls at most every 30 s. After a compact the zones re-arm, and if auto-compact fires before the clear, the session's validated handoff is attached to the compacted session instead. A typical cycle in the transcript (values illustrative):
+Each zone is signalled at most once per session (only the highest one if usage jumps past several), either with the next prompt or mid-turn, checked after tool calls at most every 30 s. After a compact the zones re-arm, and if auto-compact fires before the clear, the session's validated handoff is attached to the compacted session with its next prompt instead. A typical cycle in the transcript (values illustrative):
 
 ```text
 auto-clear-context: contesto al 41% (zona morbida, soglie 40/60/75%): la nota parte con il prossimo prompt
@@ -59,7 +59,7 @@ With `agents` on (default), the context of subagents and teammates is monitored 
 
 Each session writes its handoff to its own file, `.claude/handoff/pending/<session id>.md`, with `session: <session id>` in the frontmatter. The skill gets the id from `${CLAUDE_SESSION_ID}`, and the zone note names the same path. At the end of a turn the mod looks only at the current session's handoff, so a session never clears because another one validated its own. After a `/clear` it attaches only the handoff of the session that the clear closed. Two sessions can hand off at the same time without overwriting each other.
 
-A validated handoff stays in its file if its session is closed before the clear (for example while the hourly cap holds the clear back). No other session takes it over. While that session is still open, a manual `/clear` there attaches the handoff (without the resume prompt); otherwise resume it by hand by asking Claude to read the file. A draft left behind can only be resumed by hand.
+A validated handoff stays in its file if its session is closed before the clear (for example while the hourly cap holds the clear back). No other session takes it over. While that session is still open, a manual `/clear` there attaches the handoff to its first prompt (without the resume prompt); otherwise resume it by hand by asking Claude to read the file. A draft left behind can only be resumed by hand.
 
 Handoffs written by earlier versions in the shared `.claude/handoff/pending.md` are used only when their frontmatter carries `session:` with the id of the session that reads them. Without that field the file belongs to no session: none clears or resumes from it, it stays where it is, and the log says so once. Resume it by hand or delete it.
 
@@ -134,6 +134,7 @@ Claude can read the current usage and zone with the mod's `context_usage` tool, 
 - No `/clear` inside an agent: it is relaunched with a clean context, and a relaunched teammate loses its original `effort`.
 - Agent zones are in absolute tokens, not a share of the agent's own window (the API does not expose it); teammates in a separate pane are not monitored.
 - Claude Code only (terminal and the desktop Code tab); it does not run in claude.ai chats.
+- A user-tier mod does not run under the `classic.*` hooks that the managed tier skips (`next.to`, as `cc-plugin-sec-default@builtin` does in Team organizations). Since 0.8.0 the mod uses native events only: notes during the turn go on `tool.call`, the handoff attachment on the first `prompt.submit` after a clear or a compaction.
 - Organization policies can block personal mods: if `/status` shows "Enterprise managed settings", ask your admin.
 
 ### Early-access mods API
@@ -158,12 +159,12 @@ One TypeScript/TSX hooks module on the mods API:
 
 | Event | Role |
 | --- | --- |
-| `session.measure`, `classic.PostToolUse` | watch context usage after each turn and during long turns |
-| `prompt.submit` | attaches the zone note to the next prompt |
+| `session.measure`, `tool.call` | watch context usage after each turn (`session.measure` also re-arms the zones when usage falls back below the soft threshold); `tool.call` delivers the zone notes during long turns (`result.context`) |
+| `session.compact` | re-arms the zones and queues the session's validated handoff for the next prompt |
+| `prompt.submit` | attaches the zone note, and after a clear or a compaction the validated handoff (archived afterwards), to the next prompt |
 | `turn.complete` | checks the session's own handoff, the caps and running subagents, then runs `/clear` |
 | `session.end` | remembers which session the clear closed and submits the resume prompt |
-| `classic.SessionStart` | attaches the validated handoff of the session the clear closed (or of the compacted one) and archives it |
-| `session.start`, `command.run`, `ui.render`, `tool.call` | register and serve `/soglia`, its panel and `context_usage` |
+| `session.start`, `command.run`, `ui.render`, `tool.call` | register and serve `/soglia`, its panel and `context_usage` (the same `tool.call` also carries the notes) |
 
 Zone flags live in `$.state` and are written with `ifVersion`, so the two monitor channels never signal the same zone twice. A two-value threshold change parks its second write in `$.state`, so it survives the module reload that a `/config` write triggers. The tests use the official `claude-code/testing` kit and render the `/soglia` panel on both the terminal and the desktop surface.
 
@@ -220,7 +221,7 @@ Dopo l'handoff validato, a fine turno la mod esegue `/clear`, allega l'handoff a
 
 **Più sessioni nella stessa cartella.** Ognuna scrive il suo handoff in `.claude/handoff/pending/<id della sessione>.md`, con `session: <id della sessione>` nel frontmatter. La skill prende l'id da `${CLAUDE_SESSION_ID}` e la nota di zona riporta lo stesso percorso. A fine turno la mod guarda solo l'handoff della sessione, quindi una sessione non fa mai `/clear` per l'handoff validato di un'altra; dopo il `/clear` allega solo l'handoff della sessione che il clear ha chiuso.
 
-Se la sessione si chiude prima del clear (per esempio mentre il limite orario lo trattiene), l'handoff validato resta nel suo file e nessun'altra sessione lo prende. Finché quella sessione è aperta, un `/clear` a mano lì allega l'handoff (senza il prompt di ripresa); altrimenti chiedi a Claude di leggere quel file. Una bozza rimasta lì si riprende solo a mano.
+Se la sessione si chiude prima del clear (per esempio mentre il limite orario lo trattiene), l'handoff validato resta nel suo file e nessun'altra sessione lo prende. Finché quella sessione è aperta, un `/clear` a mano lì allega l'handoff al primo prompt (senza il prompt di ripresa); altrimenti chiedi a Claude di leggere quel file. Una bozza rimasta lì si riprende solo a mano.
 
 Gli handoff delle versioni precedenti, nel `.claude/handoff/pending.md` condiviso, valgono solo se il frontmatter porta `session:` con l'id della sessione che li legge. Senza quel campo il file non è di nessuna sessione: nessuna fa `/clear` né riprende da lì, il file resta dov'è e il log lo segnala una volta. Riprendilo a mano o cancellalo.
 
@@ -307,6 +308,7 @@ Il plugin viene letto da quella cartella: non spostarla e non cancellarla.
 - Nessun `/clear` dentro un agente: viene rilanciato a contesto pulito, e il teammate rilanciato perde l'`effort` originale.
 - Le zone degli agenti sono in token assoluti, non in quota della finestra dell'agente (l'API non la dà); i teammate in un pannello separato sono esclusi.
 - Un agente in attesa (`waiting`) di un suo lavoro in background (Bash, monitor) per più di `agentStaleMinutes` conta come fermo e il clear può partire.
+- Una mod del tier user non gira sotto i hook `classic.*` che il tier gestito salta (`next.to`, come fa `cc-plugin-sec-default@builtin` nelle organizzazioni Team). Dalla 0.8.0 la mod usa solo eventi nativi: le note durante il turno stanno su `tool.call`, l'allegato dell'handoff sul primo `prompt.submit` dopo un clear o un compact.
 - Nei worktree e nei submodule, dove `.git` è un file, l'esclusione da git non viene aggiunta.
 - L'API delle mod non cancella file: dopo la ripresa il file della sessione in `.claude/handoff/pending/` resta vuoto (vuoto vuol dire nessun handoff in attesa). Restano anche i file `status: resumed` dei subagent, con il loro contenuto. I file vuoti, quelli `resumed` e le bozze delle sessioni chiuse si accumulano lì e si possono cancellare a mano.
 

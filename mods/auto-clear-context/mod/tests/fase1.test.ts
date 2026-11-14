@@ -61,7 +61,6 @@ const world = (on: On) => {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
-  on('classic.SessionStart', () => ({}))
   return state
 }
 
@@ -96,15 +95,13 @@ test('handoff validato: un solo /clear, ripresa automatica, handoff allegato e a
   await settle($, () => state.commands.length > 0)
   expect(state.commands).toEqual(['clear'])
 
-  // Il /clear del motore: session.end con reason "clear", poi SessionStart.
+  // Il /clear del motore: session.end con reason "clear"; il prompt di ripresa porta l'handoff.
   await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
   state.session = 's2'
-  const started = await $.classic.SessionStart({ source: 'clear' })
-  expect((started.additionalContext ?? []).join('\n').includes('Rileggere src/app.ts')).toBe(true)
-
   const resumes = () => state.prompts.filter(prompt => prompt.origin.kind === 'plugin')
   await settle($, () => resumes().length > 0)
   expect(resumes().length).toBe(1)
+  expect((resumes()[0]?.context ?? []).join('\n').includes('Rileggere src/app.ts')).toBe(true)
   expect(state.files.get(PENDING)).toBe('')
   expect([...state.files.keys()].some(path => path.includes('/.claude/handoff/archive/'))).toBe(true)
   expect((state.files.get(EXCLUDE) ?? '').includes('.claude/handoff/')).toBe(true)

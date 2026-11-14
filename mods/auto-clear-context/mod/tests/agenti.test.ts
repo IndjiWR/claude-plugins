@@ -9,8 +9,8 @@ const fileKey = (path: string) => {
   return at < 0 ? slashed : slashed.slice(at)
 }
 
-const after = { tool_name: 'Bash', tool_input: {}, tool_response: {}, tool_use_id: 'u1' } as const
-const agentAfter = (agentId: string) => ({ ...after, agent_id: agentId, agent_type: 'general-purpose' }) as never
+// Un tool qualsiasi della principale o di un agente: le note durante il turno arrivano nel suo `context`.
+const bash = (agentId?: string) => ({ tool: 'Bash', command: 'ls', ...(agentId === undefined ? {} : { agentId }) }) as never
 
 const usageOf = (tokens: number) => ({
   model: 'm',
@@ -57,6 +57,8 @@ const world = (
     // Ogni tool.call che arriva al fondo, in ordine; `denied` rifiuta il tool con quel motivo.
     toolCalls: [] as Record<string, unknown>[],
     denied: new Map<string, string>(),
+    // Se impostato, il context che il fondo di tool.call restituisce già.
+    bottomContext: undefined as string[] | undefined,
     // Tool che finiscono con isError (senza deny).
     errored: new Set<string>(),
     // Letture di ogni file: tryClear rilegge l'handoff della principale a ogni controllo.
@@ -112,7 +114,8 @@ const world = (
     const denial = state.denied.get(e.tool)
     if (denial !== undefined) return { deny: denial } as never
     if (state.errored.has(e.tool)) return { result: undefined, isError: true, text: 'spawn fallito' } as never
-    return { result: state.agentRecord, text: 'ok' } as never
+    const answer = { result: state.agentRecord, text: 'ok' }
+    return (state.bottomContext === undefined ? answer : { ...answer, context: state.bottomContext }) as never
   })
   on('prompt.submit', (_, e) => {
     state.prompts.push(e.text)
@@ -142,19 +145,18 @@ const world = (
     if (e.agentId === undefined && state.throws.has('turn.complete')) throw new Error('fine turno esplosa')
     return { text: e.answer }
   })
-  on('classic.PostToolUse', () => ({}))
   on('turn.step', async function* () {
     return stepResult(state.tokens === null ? null : usageOf(state.tokens))
   })
   return state
 }
 
-// Un passo dell'agente con `tokens` di contesto, poi il suo PostToolUse: le note che porta.
+// Un passo dell'agente con `tokens` di contesto, poi un suo tool: le note che porta.
 const step = async ($: Engine, state: { tokens: number | null }, tokens: number | null, agentId = 'a1') => {
   state.tokens = tokens
   const it = $.turn.step(stepInput(agentId))
   while (!(await it.next()).done);
-  return (await $.classic.PostToolUse(agentAfter(agentId))).additionalContext ?? []
+  return (await $.tool.call(bash(agentId))).context ?? []
 }
 
 test('subagent: una nota per zona, col percorso dell handoff', async ($, on) => {
@@ -231,13 +233,35 @@ test('monitor spento (morbida 0): nessuna nota agli agenti', { options: { thresh
   expect((await step($, state, 125_000)).length).toBe(0)
 })
 
+test('subagent: la nota si aggiunge al context già restituito dal fondo', async ($, on) => {
+  const state = world(on)
+  state.bottomContext = ['dal fondo']
+  const [first, note, ...rest] = await step($, state, 125_000)
+  expect(first).toBe('dal fondo')
+  expect(note).toContain('s1--a1.md')
+  expect(rest.length).toBe(0)
+})
+
+test('subagent: tool rifiutato, il deny passa intatto e la nota resta per il tool dopo', async ($, on) => {
+  const state = world(on)
+  state.tokens = 125_000
+  const it = $.turn.step(stepInput('a1'))
+  while (!(await it.next()).done);
+  state.denied.set('Bash', 'vietato')
+  const result = await $.tool.call(bash('a1'))
+  expect(result.deny).toBe('vietato')
+  expect(result.context).toBe(undefined)
+  state.denied.delete('Bash')
+  expect((await $.tool.call(bash('a1'))).context?.join(' ') ?? '').toContain('s1--a1.md')
+})
+
 test('la principale senza agent_id non riceve note dai passi degli agenti', async ($, on) => {
   const state = world(on)
   state.tokens = 125_000
   const it = $.turn.step(stepInput('a1'))
   while (!(await it.next()).done);
-  const result = await $.classic.PostToolUse(after)
-  expect(result.additionalContext ?? []).toEqual([])
+  const result = await $.tool.call(bash())
+  expect(result.context ?? []).toEqual([])
 })
 
 // Validazione dell'handoff di un teammate.
@@ -461,7 +485,7 @@ test('il teammate rilanciato torna sotto il monitor, il validatore no; le mappe 
   await validate($, state)
   expect(restarted(state).length).toBe(1)
   // a1 è fermato: il suo contesto è stato dimenticato, nessuna nota.
-  expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
+  expect((await $.tool.call(bash('a1'))).context ?? []).toEqual([])
   // Il nuovo teammate è in elenco e viene misurato; il validatore resta escluso.
   list.push({ id: 'a2', teammateId: 'pose@t', type: 'general-purpose', description: 'posa', status: 'running' })
   const [note] = await step($, state, 125_000, 'a2')
@@ -658,10 +682,10 @@ test('principale con handoff validato e agente running: niente clear, una nota d
   await $.turn.complete(mainDone())
   await settled()
   expect(state.commands).toEqual([])
-  const [first, ...rest] = (await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []
+  const [first, ...rest] = (await $.tool.call(bash('a1'))).context ?? []
   expect(rest.length).toBe(0)
   expect(first).toContain('la sessione principale riparte')
-  expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
+  expect((await $.tool.call(bash('a1'))).context ?? []).toEqual([])
   Object.assign(list[0] ?? {}, { status: 'idle' })
   await $.turn.complete(done('a1'))
   await settled()
@@ -767,18 +791,18 @@ test('dopo 20 minuti di rinvio un solo avviso, senza forzare il clear', async ($
   const state = world(on, [...running(), { id: 'a2', type: 'general-purpose', description: 'y', status: 'running' }])
   state.files.set(MAIN_FILE, MAIN_VALIDATED)
   await $.turn.complete(mainDone())
-  await $.classic.PostToolUse(agentAfter('a1'))
+  await $.tool.call(bash('a1'))
   expect(state.toasts).toEqual([])
   await state.clock.advance(19 * 60_000)
-  await $.classic.PostToolUse(agentAfter('a1'))
+  await $.tool.call(bash('a1'))
   expect(state.toasts).toEqual([])
   await state.clock.advance(2 * 60_000)
-  await $.classic.PostToolUse(agentAfter('a1'))
+  await $.tool.call(bash('a1'))
   await settled()
   expect(state.toasts.length).toBe(1)
   expect(state.toasts[0]).toContain('clear rimandato da 21 minuti')
   expect(state.logs.filter(line => line.includes('clear rimandato da 21 minuti')).length).toBe(1)
-  await $.classic.PostToolUse(agentAfter('a1'))
+  await $.tool.call(bash('a1'))
   await $.turn.complete(done('a1'))
   await settled()
   expect(state.toasts.length).toBe(1)
@@ -789,7 +813,7 @@ test('opzione agents false: gli agenti non ricevono la nota di pausa', { options
   const state = world(on, running())
   state.files.set(MAIN_FILE, MAIN_VALIDATED)
   await $.turn.complete(mainDone())
-  expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
+  expect((await $.tool.call(bash('a1'))).context ?? []).toEqual([])
 })
 
 // Agenti dati attivi ma senza attività: non trattengono il clear oltre agentStaleMinutes.
