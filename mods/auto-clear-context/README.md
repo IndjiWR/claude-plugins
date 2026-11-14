@@ -118,7 +118,7 @@ Claude can read the current usage and zone with the mod's `context_usage` tool, 
 - **Only a handoff marked validated clears.** The mod runs `/clear` only when the frontmatter of the session's handoff says `status: validated`, which the skill sets after up to 2 rounds with the read-only validator. A draft never triggers a clear. The mod trusts that flag: it reads only the frontmatter, so a file marked validated by hand clears too.
 - **Only for the session that wrote it.** The clear runs only in the session that wrote the handoff, and only the fresh session that follows that clear gets the handoff attached. A validated file in a session's slot whose frontmatter carries another session's id is skipped and logged.
 - **One clear per handoff**, and at most `maxClearsPerHour` (default 3) per rolling hour; past that the handoff waits. The count is kept in the mod's store, so it is shared by all sessions on the machine.
-- **Never with work in flight.** No clear after an interrupted turn, while the main session is in a turn, or while an agent is pending, running or waiting. The clear is rechecked when an agent ends its turn: that agent counts as stopped; idle teammates, the mod's validators and the agents it started do not hold the clear back. In every zone the skill makes Claude wait for or stop background work first. In the soft and hard zones the skill and the zone notes also rule out handing off mid-edit, mid-debug or with a question to the user pending; whatever is left unfinished in the hard zone or the safety margin goes into the handoff's interrupted-work section.
+- **Never with work in flight.** No clear after an interrupted turn, while the main session is in a turn, or while an agent is pending, running or waiting, except agents with no observed activity for `agentStaleMinutes` (separate-pane teammates never expire: only the roster counts for them). The clear is rechecked when an agent ends its turn: that agent counts as stopped; idle teammates, the mod's validators and the agents it started do not hold the clear back. In every zone the skill makes Claude wait for or stop background work first. In the soft and hard zones the skill and the zone notes also rule out handing off mid-edit, mid-debug or with a question to the user pending; whatever is left unfinished in the hard zone or the safety margin goes into the handoff's interrupted-work section.
 - **Bounded retry.** If `/clear` fails the mod retries once after 300 ms, then gives up and logs why. That handoff then counts as used: change it and validate it again to get a new clear.
 - **Everything is visible.** Every step shows up in the transcript (`auto-clear-context: …` lines) and in `.claude/handoff/events.log` (last 300 events).
 - **Kept out of git.** When the project root has a `.git` directory, the mod adds `.claude/handoff/` to `.git/info/exclude`, which is local and never committed. The skill also tells Claude to keep handoffs under 9,000 characters and free of secrets; the mod does not check either.
@@ -127,8 +127,9 @@ Claude can read the current usage and zone with the mod's `context_usage` tool, 
 
 - The "Ripristina /config" (restore `/config`) button of the `/soglia` panel does not work yet in real sessions, although the test kit's version of the flow passes: set the value with `/soglia N`.
 - The mod cannot see background commands (Bash, monitors); the skill makes Claude wait for them or stop them before the handoff.
+- An agent `waiting` on its own background work (Bash, monitor) for longer than `agentStaleMinutes` counts as stalled, and the clear can go ahead.
 - The git exclude is skipped in worktrees and submodules, where `.git` is a file.
-- The mods API cannot delete files: after the resume a session's file in `.claude/handoff/pending/` stays behind empty (an empty file means nothing pending). Empty files and drafts left by closed sessions pile up there and can be deleted by hand.
+- The mods API cannot delete files: after the resume a session's file in `.claude/handoff/pending/` stays behind empty (an empty file means nothing pending); subagent handoffs marked `status: resumed` stay too, with their content. Empty files, `resumed` files and drafts left by closed sessions pile up there and can be deleted by hand.
 - Teammate auto-relaunch (0.6.0) is covered by tests but not yet verified live: `claude -p` has no `TeamCreate`, so it needs an interactive session with a team.
 - No `/clear` inside an agent: it is relaunched with a clean context, and a relaunched teammate loses its original `effort`.
 - Agent zones are in absolute tokens, not a share of the agent's own window (the API does not expose it); teammates in a separate pane are not monitored.
@@ -228,7 +229,7 @@ Dopo l'aggiornamento riavvia le sessioni aperte: finché usano la versione vecch
 Sicurezze:
 - `/clear` solo nella sessione che ha scritto l'handoff, e l'handoff va solo alla sessione pulita che la segue;
 - un solo clear per handoff, al massimo 3 clear all'ora contati su tutte le sessioni (opzione `maxClearsPerHour`);
-- nessun clear con la principale in un turno o con agenti ancora attivi (pending, running, waiting); si ricontrolla quando un agente finisce il turno, e quell'agente conta come fermo; teammate `idle`, validatori e agenti avviati dalla mod non lo trattengono;
+- nessun clear con la principale in un turno o con agenti ancora attivi (pending, running, waiting), salvo quelli senza attività da `agentStaleMinutes` (i teammate in un pannello separato non scadono mai: per loro conta solo l'elenco); si ricontrolla quando un agente finisce il turno, e quell'agente conta come fermo; teammate `idle`, validatori e agenti avviati dalla mod non lo trattengono;
 - ogni passaggio compare nel transcript (righe `auto-clear-context: …`) e in `.claude/handoff/events.log`.
 
 Nel progetto la mod usa la cartella `.claude/handoff/`, con `pending/` (un handoff per sessione), `archive/` ed `events.log`. Se la root del progetto ha una cartella `.git`, la aggiunge da sola a `.git/info/exclude`, così non finisce in un commit.
@@ -305,8 +306,9 @@ Il plugin viene letto da quella cartella: non spostarla e non cancellarla.
 - Il rilancio automatico dei teammate (0.6.0) è coperto dai test ma non ancora collaudato dal vivo: con `claude -p` `TeamCreate` non c'è, serve una sessione interattiva con un team.
 - Nessun `/clear` dentro un agente: viene rilanciato a contesto pulito, e il teammate rilanciato perde l'`effort` originale.
 - Le zone degli agenti sono in token assoluti, non in quota della finestra dell'agente (l'API non la dà); i teammate in un pannello separato sono esclusi.
+- Un agente in attesa (`waiting`) di un suo lavoro in background (Bash, monitor) per più di `agentStaleMinutes` conta come fermo e il clear può partire.
 - Nei worktree e nei submodule, dove `.git` è un file, l'esclusione da git non viene aggiunta.
-- L'API delle mod non cancella file: dopo la ripresa il file della sessione in `.claude/handoff/pending/` resta vuoto (vuoto vuol dire nessun handoff in attesa). I file vuoti e le bozze delle sessioni chiuse si accumulano lì e si possono cancellare a mano.
+- L'API delle mod non cancella file: dopo la ripresa il file della sessione in `.claude/handoff/pending/` resta vuoto (vuoto vuol dire nessun handoff in attesa). Restano anche i file `status: resumed` dei subagent, con il loro contenuto. I file vuoti, quelli `resumed` e le bozze delle sessioni chiuse si accumulano lì e si possono cancellare a mano.
 
 ### Sviluppo
 
