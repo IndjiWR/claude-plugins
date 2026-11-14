@@ -55,6 +55,8 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     denied: new Map<string, string>(),
     // Tool che finiscono con isError (senza deny).
     errored: new Set<string>(),
+    // Letture di ogni file: tryClear rilegge l'handoff della principale a ogni controllo.
+    reads: new Map<string, number>(),
     prompts: [] as string[],
   }
   on('session.id', () => ({ value: state.session }))
@@ -69,6 +71,7 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
       state.beforeRead = undefined
       await hook.action()
     }
+    state.reads.set(fileKey(e.path), (state.reads.get(fileKey(e.path)) ?? 0) + 1)
     const text = state.files.get(fileKey(e.path))
     return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
   })
@@ -124,6 +127,7 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     state.commands.push(e.command)
     return { text: `/${e.command}` }
   })
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('ui.toast', (_, e) => {
     state.toasts.push(e.text)
     return { value: undefined }
@@ -904,4 +908,84 @@ test("Agent finito con isError: l'handoff resta in pending con status ready", as
   expect(state.files.get(SUB_FILE)).toBe(text)
   expect(archived(state)).toEqual([])
   expect(resumedLogs(state)).toEqual([])
+})
+
+// Timer della scadenza: i controlli che fa si vedono come letture dell'handoff della principale.
+const mainReads = (state: { reads: Map<string, number> }) => state.reads.get(MAIN_FILE) ?? 0
+const twoRunning = () => [...running(), { id: 'a2', type: 'general-purpose', description: 'y', status: 'running' }]
+const agentStep = async ($: Engine, agentId: string) => {
+  const it = $.turn.step(stepInput(agentId))
+  while (!(await it.next()).done);
+}
+
+test('agente stantio che torna attivo trattiene di nuovo il clear e può essere riloggato', async ($, on) => {
+  const state = world(on, twoRunning())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await state.clock.advance(20 * 60_000)
+  await agentStep($, 'a2')
+  // A 30 minuti a1 è stantio, a2 no.
+  await state.clock.advance(10 * 60_000)
+  await settled()
+  const a1Logs = () => state.logs.filter(line => line.includes('agente a1 senza attività'))
+  expect(a1Logs().length).toBe(1)
+  expect(state.commands).toEqual([])
+  // a1 torna attivo a 35: a 50 scade a2, a1 trattiene ancora il clear fino a 65.
+  await state.clock.advance(5 * 60_000)
+  await agentStep($, 'a1')
+  await state.clock.advance(29 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  await state.clock.advance(60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  expect(a1Logs().length).toBe(2)
+})
+
+test('più rinvii: un solo timer armato, il precedente non scatta', async ($, on) => {
+  const state = world(on, twoRunning())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await state.clock.advance(10 * 60_000)
+  await agentStep($, 'a1')
+  // Un nuovo rinvio (fine turno di a2) riarma il timer: scadenza a 40, la vecchia a 30 non deve scattare.
+  await $.turn.complete(done('a2'))
+  await settled()
+  const before = mainReads(state)
+  await state.clock.advance(25 * 60_000)
+  await settled()
+  expect(mainReads(state)).toBe(before)
+  expect(state.commands).toEqual([])
+})
+
+test('resetDeferral cancella il timer: handoff tolto e rimesso, nessun controllo alla vecchia scadenza', async ($, on) => {
+  const state = world(on, twoRunning())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  state.files.set(MAIN_FILE, '')
+  await $.turn.complete(done('a2'))
+  await settled()
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  const before = mainReads(state)
+  await state.clock.advance(31 * 60_000)
+  await settled()
+  expect(mainReads(state)).toBe(before)
+  expect(state.commands).toEqual([])
+})
+
+test('dopo il clear e session.end il timer non resta armato', async ($, on) => {
+  const list = running()
+  const state = world(on, list)
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  Object.assign(list[0] ?? {}, { status: 'idle' })
+  await $.turn.complete(done('a1'))
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } } as never)
+  await settled()
+  const before = mainReads(state)
+  await state.clock.advance(31 * 60_000)
+  await settled()
+  expect(mainReads(state)).toBe(before)
 })
