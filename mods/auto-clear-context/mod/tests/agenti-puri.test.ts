@@ -91,8 +91,9 @@ test('isStale: scadenza in minuti, 0 la spegne', () => {
 })
 
 test("resumedHandoff: percorso dell'handoff di un subagent ripreso", () => {
-  expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1--a7.md (repo /x)")).toBe('.claude/handoff/pending/s1--a7.md')
-  expect(resumedHandoff("Riprendi dall'handoff /Users/x/p/.claude/handoff/pending/s1--a7.md (repo /x)")).toBe('.claude/handoff/pending/s1--a7.md')
+  const found = { path: '.claude/handoff/pending/s1--a7.md', agentId: 'a7' }
+  expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1--a7.md (repo /x)")).toEqual(found)
+  expect(resumedHandoff("Riprendi dall'handoff /Users/x/p/.claude/handoff/pending/s1--a7.md (repo /x)")).toEqual(found)
   expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1.md")).toBe(undefined)
   expect(resumedHandoff('Fai qualcosa di diverso')).toBe(undefined)
 })

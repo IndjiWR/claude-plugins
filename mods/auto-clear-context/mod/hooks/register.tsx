@@ -334,17 +334,16 @@ const archive = async ($: EngineInterface, handoff: Handoff) => {
 
 // Un Agent riuscito che riprende l'handoff di un subagent: il file resta in pending/ col suo testo (l'agente
 // in background può leggerlo dopo che next si risolve), segnato status: resumed, con una copia in archive/.
-const archiveResumed = async ($: EngineInterface, prompt: string | undefined) => {
-  const path = resumedHandoff(prompt ?? '')
-  if (path === undefined) return
+const archiveResumed = async ($: EngineInterface, prompt: string) => {
+  const found = resumedHandoff(prompt)
+  if (found === undefined) return
   const { root } = await paths($)
-  const handoff = await readHandoff($, `${root}/${path}`)
+  const handoff = await readHandoff($, `${root}/${found.path}`)
   if (handoff === undefined) return
   const resumed = { ...handoff, text: setFront(handoff.text, { status: 'resumed' }) }
   const archived = await archiveCopy($, resumed)
   await $.fs.write(handoff.path, resumed.text)
-  const agentId = /--([^/]+)\.md$/.exec(path)?.[1] ?? ''
-  log($, `handoff dell'agente ${short(agentId)} ripreso: segnato resumed, copia in ${archived}`)
+  log($, `handoff dell'agente ${short(found.agentId)} ripreso: segnato resumed, copia in ${archived}`)
 }
 
 const runClear = ($: EngineInterface, canRetry: boolean) => {

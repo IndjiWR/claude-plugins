@@ -129,9 +129,10 @@ export const leadFallback = (name: string, path: string, reason: string) =>
 export const isStale = (lastSeen: number, now: number, minutes: number): boolean =>
   minutes > 0 && now - lastSeen >= minutes * 60_000
 
-// Il percorso dell'handoff di un subagent in un prompt «Riprendi dall'handoff …»; undefined
-// se manca o se è l'handoff di una principale (nome file senza "--").
-export const resumedHandoff = (prompt: string): string | undefined => {
+// Il percorso e l'id dell'agente dell'handoff di un subagent in un prompt «Riprendi dall'handoff …»;
+// undefined se manca o se è l'handoff di una principale (nome file senza "--").
+export const resumedHandoff = (prompt: string): { path: string; agentId: string } | undefined => {
   const path = /Riprendi dall'handoff\s+\S*?(\.claude\/handoff\/pending\/[^\s/]+\.md)/.exec(prompt)?.[1]
-  return path && agentIdOf(path) ? path : undefined
+  const agentId = path === undefined ? '' : agentIdOf(path)
+  return path !== undefined && agentId !== '' ? { path, agentId } : undefined
 }
