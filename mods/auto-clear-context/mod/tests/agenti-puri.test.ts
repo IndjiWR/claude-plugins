@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, appendGaps, leadFallback, parseVerdict, pauseNote, setFront } from '../hooks/agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, appendGaps, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from '../hooks/agents'
 
 const main = agentLimits(true, 120_000, 150_000)
 const path = '.claude/handoff/pending/s1--a7.md'
@@ -82,4 +82,17 @@ test("agentZoneNote: commit dei propri file prima dell'handoff", () => {
     expect(note).toContain('non committati')
   }
   expect(agentZoneNote('teammate', 1, 130_000, main, path, 'x')).toContain(`HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo`)
+})
+
+test('isStale: scadenza in minuti, 0 la spegne', () => {
+  expect(isStale(0, 30 * 60_000, 30)).toBe(true)
+  expect(isStale(0, 30 * 60_000 - 1, 30)).toBe(false)
+  expect(isStale(0, 1e12, 0)).toBe(false)
+})
+
+test("resumedHandoff: percorso dell'handoff di un subagent ripreso", () => {
+  expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1--a7.md (repo /x)")).toBe('.claude/handoff/pending/s1--a7.md')
+  expect(resumedHandoff("Riprendi dall'handoff /Users/x/p/.claude/handoff/pending/s1--a7.md (repo /x)")).toBe('.claude/handoff/pending/s1--a7.md')
+  expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1.md")).toBe(undefined)
+  expect(resumedHandoff('Fai qualcosa di diverso')).toBe(undefined)
 })
