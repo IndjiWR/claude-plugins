@@ -40,6 +40,12 @@
       "title": "Soglia dura degli agenti (token)",
       "description": "Token oltre i quali l'handoff è previsto al primo punto sicuro; il margine di sicurezza è 30000 sopra. Se non supera la morbida vale morbida + 30000.",
       "default": 150000
+    },
+    "agentStaleMinutes": {
+      "type": "number",
+      "title": "Scadenza degli agenti (minuti)",
+      "description": "Minuti senza attività dopo cui un agente dato ancora attivo non trattiene più il clear della principale. 0 la spegne.",
+      "default": 30
     }
   }
 }

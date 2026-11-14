@@ -780,3 +780,58 @@ test('opzione agents false: gli agenti non ricevono la nota di pausa', { options
   await $.turn.complete(mainDone())
   expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
 })
+
+// Agenti dati attivi ma senza attività: non trattengono il clear oltre agentStaleMinutes.
+const staleLogs = (state: { logs: string[] }) => state.logs.filter(line => line.includes('senza attività da'))
+
+test('agente running senza attività da 30 minuti: log una volta e il clear parte dal timer, senza fini turno', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.commands).toEqual([])
+  await state.clock.advance(30 * 60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  const lines = staleLogs(state)
+  expect(lines.length).toBe(1)
+  expect(lines[0]).toContain('senza attività da 30 minuti')
+})
+
+test('agente con attività recente non è stantio', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(25 * 60_000)
+  const it = $.turn.step(stepInput('a1'))
+  while (!(await it.next()).done);
+  await state.clock.advance(10 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  expect(staleLogs(state)).toEqual([])
+})
+
+test('agentStaleMinutes 0: nessuna scadenza', { options: { agentStaleMinutes: 0 } }, async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(60 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  expect(staleLogs(state)).toEqual([])
+})
+
+test('timer con la principale in un turno: niente clear, parte alla sua fine turno', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await $.turn.start(mainStart('m2'))
+  await state.clock.advance(30 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  await $.turn.complete(mainDone('m2'))
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})
