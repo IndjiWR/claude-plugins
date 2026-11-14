@@ -30,8 +30,8 @@ Non obiettivi: forzare il clear con agenti davvero attivi; validare gli handoff 
 - C — leggere `finished` dal `.meta.json` dell'agente: segnale esatto per l'incidente ma formato interno, solo subagent.
 
 ## Design
-- Nuova opzione `agentStaleMinutes` (numero, default 20, 0 = spenta): «Minuti senza attività dopo cui un agente dato
-  ancora attivo non trattiene più il clear della principale». 20 > 10 minuti, il tetto delle suite in primo piano.
+- Nuova opzione `agentStaleMinutes` (numero, default 30, 0 = spenta): «Minuti senza attività dopo cui un agente dato
+  ancora attivo non trattiene più il clear della principale». 30: oltre l'avviso dei 20 minuti e il tetto di 10 minuti delle suite in primo piano.
 - `activeAgents` esclude gli agenti stantii; al primo che esclude, log
   `agente <id> senza attività da N minuti: non trattiene più il clear` (una volta per agente).
 - Al rinvio del clear: `$.clock.after` alla scadenza più vicina tra gli agenti attivi → `tryClear('agenti stantii')`
