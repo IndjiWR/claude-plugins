@@ -24,8 +24,12 @@ const stepInput = (agentId?: string) => ({ turnId: 't', index: 0, model: 'm', me
 
 // Il mondo sotto il monitor: una principale con finestra da 1M, l'elenco degli
 // agenti e il fondo di turn.step che risponde con l'usage di `state.tokens`.
-const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-purpose', description: 'x', status: 'running' }]) => {
-  mock.store(on)
+const world = (
+  on: On,
+  agents: readonly object[] = [{ id: 'a1', type: 'general-purpose', description: 'x', status: 'running' }],
+  store: Record<string, unknown> = {},
+) => {
+  mock.store(on, store)
   const clock = mock.clock(on, { now: 1_000_000 })
   const state = {
     clock,
@@ -53,6 +57,10 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     // Ogni tool.call che arriva al fondo, in ordine; `denied` rifiuta il tool con quel motivo.
     toolCalls: [] as Record<string, unknown>[],
     denied: new Map<string, string>(),
+    // Tool che finiscono con isError (senza deny).
+    errored: new Set<string>(),
+    // Letture di ogni file: tryClear rilegge l'handoff della principale a ogni controllo.
+    reads: new Map<string, number>(),
     prompts: [] as string[],
   }
   on('session.id', () => ({ value: state.session }))
@@ -67,6 +75,7 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
       state.beforeRead = undefined
       await hook.action()
     }
+    state.reads.set(fileKey(e.path), (state.reads.get(fileKey(e.path)) ?? 0) + 1)
     const text = state.files.get(fileKey(e.path))
     return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
   })
@@ -102,6 +111,7 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     if (state.throws.has(e.tool)) throw new Error(`${e.tool} è esploso`)
     const denial = state.denied.get(e.tool)
     if (denial !== undefined) return { deny: denial } as never
+    if (state.errored.has(e.tool)) return { result: undefined, isError: true, text: 'spawn fallito' } as never
     return { result: state.agentRecord, text: 'ok' } as never
   })
   on('prompt.submit', (_, e) => {
@@ -121,6 +131,7 @@ const world = (on: On, agents: readonly object[] = [{ id: 'a1', type: 'general-p
     state.commands.push(e.command)
     return { text: `/${e.command}` }
   })
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('ui.toast', (_, e) => {
     state.toasts.push(e.text)
     return { value: undefined }
@@ -779,4 +790,255 @@ test('opzione agents false: gli agenti non ricevono la nota di pausa', { options
   state.files.set(MAIN_FILE, MAIN_VALIDATED)
   await $.turn.complete(mainDone())
   expect((await $.classic.PostToolUse(agentAfter('a1'))).additionalContext ?? []).toEqual([])
+})
+
+// Agenti dati attivi ma senza attività: non trattengono il clear oltre agentStaleMinutes.
+const staleLogs = (state: { logs: string[] }) => state.logs.filter(line => line.includes('senza attività da'))
+
+test('agente running senza attività da 30 minuti: log una volta e il clear parte dal timer, senza fini turno', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.commands).toEqual([])
+  await state.clock.advance(30 * 60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  const lines = staleLogs(state)
+  expect(lines.length).toBe(1)
+  expect(lines[0]).toContain('senza attività da 30 minuti')
+})
+
+test('agente con attività recente non è stantio', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(25 * 60_000)
+  const it = $.turn.step(stepInput('a1'))
+  while (!(await it.next()).done);
+  await state.clock.advance(10 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  expect(staleLogs(state)).toEqual([])
+})
+
+test('agentStaleMinutes 0: nessuna scadenza', { options: { agentStaleMinutes: 0 } }, async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(60 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  expect(staleLogs(state)).toEqual([])
+})
+
+test('timer con la principale in un turno: niente clear, parte alla sua fine turno', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await $.turn.start(mainStart('m2'))
+  await state.clock.advance(30 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  await $.turn.complete(mainDone('m2'))
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})
+
+// Handoff di un subagent ripreso dalla principale con un nuovo Agent.
+const SUB_FILE = '.claude/handoff/pending/s1--a7.md'
+const resumeCall = (path: string) =>
+  ({ tool: 'Agent', subagent_type: 'general-purpose', description: 'ripresa', prompt: `Riprendi dall'handoff ${path} (repo C:/progetto)` }) as never
+const resumedLogs = (state: { logs: string[] }) => state.logs.filter(line => line.includes('ripreso: segnato resumed'))
+
+// Il file in pending/ resta leggibile (il subagent ripreso può leggerlo dopo che next si risolve), segnato resumed.
+test("Agent con «Riprendi dall'handoff» di un subagent: pending segnato resumed col suo testo, copia in archive, una riga di log", async ($, on) => {
+  const state = world(on)
+  state.files.set(SUB_FILE, ready().replace('agent: a1', 'agent: a7'))
+  const result = await $.tool.call(resumeCall(SUB_FILE))
+  await settled()
+  expect(result.deny).toBeUndefined()
+  expect(state.agentCalls).toBe(1)
+  expect(state.files.get(SUB_FILE)).toContain('status: resumed')
+  expect(state.files.get(SUB_FILE)).toContain('Fare x.')
+  const [copy, ...rest] = archived(state)
+  expect(rest.length).toBe(0)
+  expect(state.files.get(copy ?? '')).toContain('status: resumed')
+  expect(state.files.get(copy ?? '')).toContain('Fare x.')
+  const lines = resumedLogs(state)
+  expect(lines.length).toBe(1)
+  expect(lines[0]).toContain(`handoff dell'agente a7 ripreso: segnato resumed, copia in ${copy}`)
+})
+
+test("Agent rifiutato (deny): l'handoff resta in pending", async ($, on) => {
+  const state = world(on)
+  const text = ready().replace('agent: a1', 'agent: a7')
+  state.files.set(SUB_FILE, text)
+  state.denied.set('Agent', 'no')
+  const result = await $.tool.call(resumeCall(SUB_FILE))
+  await settled()
+  expect(result.deny).toBeDefined()
+  expect(state.agentCalls).toBe(1)
+  expect(state.files.get(SUB_FILE)).toBe(text)
+  expect(archived(state)).toEqual([])
+  expect(resumedLogs(state)).toEqual([])
+})
+
+test('prompt con handoff della principale o file inesistente: nessuna archiviazione, nessun errore', async ($, on) => {
+  const state = world(on)
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  const main = await $.tool.call(resumeCall(MAIN_FILE))
+  const missing = await $.tool.call(resumeCall('.claude/handoff/pending/s1--zz.md'))
+  await settled()
+  expect(main.deny).toBeUndefined()
+  expect(missing.deny).toBeUndefined()
+  expect(state.agentCalls).toBe(2)
+  expect(state.files.get(MAIN_FILE)).toBe(MAIN_VALIDATED)
+  expect(archived(state)).toEqual([])
+  expect(resumedLogs(state)).toEqual([])
+})
+
+test("Agent finito con isError: l'handoff resta in pending con status ready", async ($, on) => {
+  const state = world(on)
+  const text = ready().replace('agent: a1', 'agent: a7')
+  state.files.set(SUB_FILE, text)
+  state.errored.add('Agent')
+  const result = await $.tool.call(resumeCall(SUB_FILE))
+  await settled()
+  expect(result.isError).toBe(true)
+  expect(state.agentCalls).toBe(1)
+  expect(state.files.get(SUB_FILE)).toBe(text)
+  expect(archived(state)).toEqual([])
+  expect(resumedLogs(state)).toEqual([])
+})
+
+// Timer della scadenza: i controlli che fa si vedono come letture dell'handoff della principale.
+const mainReads = (state: { reads: Map<string, number> }) => state.reads.get(MAIN_FILE) ?? 0
+const twoRunning = () => [...running(), { id: 'a2', type: 'general-purpose', description: 'y', status: 'running' }]
+const agentStep = async ($: Engine, agentId: string) => {
+  const it = $.turn.step(stepInput(agentId))
+  while (!(await it.next()).done);
+}
+
+test('agente stantio che torna attivo trattiene di nuovo il clear e può essere riloggato', async ($, on) => {
+  const state = world(on, twoRunning())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await state.clock.advance(20 * 60_000)
+  await agentStep($, 'a2')
+  // A 30 minuti a1 è stantio, a2 no.
+  await state.clock.advance(10 * 60_000)
+  await settled()
+  const a1Logs = () => state.logs.filter(line => line.includes('agente a1 senza attività'))
+  expect(a1Logs().length).toBe(1)
+  expect(state.commands).toEqual([])
+  // a1 torna attivo a 35: a 50 scade a2, a1 trattiene ancora il clear fino a 65.
+  await state.clock.advance(5 * 60_000)
+  await agentStep($, 'a1')
+  await state.clock.advance(29 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  await state.clock.advance(60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  expect(a1Logs().length).toBe(2)
+})
+
+test('più rinvii: un solo timer armato, il precedente non scatta', async ($, on) => {
+  const state = world(on, twoRunning())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await state.clock.advance(10 * 60_000)
+  await agentStep($, 'a1')
+  // Un nuovo rinvio (fine turno di a2) riarma il timer: scadenza a 40, la vecchia a 30 non deve scattare.
+  await $.turn.complete(done('a2'))
+  await settled()
+  const before = mainReads(state)
+  await state.clock.advance(25 * 60_000)
+  await settled()
+  expect(mainReads(state)).toBe(before)
+  expect(state.commands).toEqual([])
+})
+
+test('resetDeferral cancella il timer: handoff tolto e rimesso, nessun controllo alla vecchia scadenza', async ($, on) => {
+  const state = world(on, twoRunning())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  state.files.set(MAIN_FILE, '')
+  await $.turn.complete(done('a2'))
+  await settled()
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  const before = mainReads(state)
+  await state.clock.advance(31 * 60_000)
+  await settled()
+  expect(mainReads(state)).toBe(before)
+  expect(state.commands).toEqual([])
+})
+
+test('dopo il clear e session.end il timer non resta armato', async ($, on) => {
+  const list = running()
+  const state = world(on, list)
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  Object.assign(list[0] ?? {}, { status: 'idle' })
+  await $.turn.complete(done('a1'))
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } } as never)
+  await settled()
+  const before = mainReads(state)
+  await state.clock.advance(31 * 60_000)
+  await settled()
+  expect(mainReads(state)).toBe(before)
+})
+
+// L'id che la mod dà a un handoff (FNV-1a a 32 bit più la lunghezza, come fingerprint in register.tsx).
+const handoffId = (text: string) => {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `${hash.toString(16).padStart(8, '0')}${text.length.toString(16)}`
+}
+
+test("handoff che ha già avuto il suo clear durante il rinvio: il timer della scadenza è cancellato", async ($, on) => {
+  // Il rinvio arma il timer con un handoff; poi la principale lo riscrive con uno che ha già avuto il suo clear.
+  const other = MAIN_VALIDATED.replace('Fare y.', 'Fare z.')
+  const state = world(on, twoRunning(), { clears: [{ at: 0, handoff: handoffId(other) }] })
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.logs.some(line => line.includes('clear rimandato'))).toBe(true)
+  state.files.set(MAIN_FILE, other)
+  await $.turn.complete(done('a2'))
+  await settled()
+  expect(state.logs.filter(line => line.includes('ha già avuto il suo clear')).length).toBe(1)
+  const before = mainReads(state)
+  await state.clock.advance(31 * 60_000)
+  await settled()
+  expect(mainReads(state)).toBe(before)
+})
+
+test('teammate in pannello separato (id === teammateId), running senza eventi per 60 minuti: nessun clear', async ($, on) => {
+  const state = world(on, [{ id: 'w@t', teammateId: 'w@t', type: 'teammate', description: 'x', status: 'running' }, validator('v1')])
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(60 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  expect(staleLogs(state)).toEqual([])
+})
+
+test('agentStaleMinutes enorme: limitato a 1440 minuti', { options: { agentStaleMinutes: 100_000 } }, async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(1440 * 60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
 })

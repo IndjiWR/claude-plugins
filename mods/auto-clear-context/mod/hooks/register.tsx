@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage } from 'claude-code'
+import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage, Timer } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, formatK, appendGaps, leadFallback, parseVerdict, pauseNote, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, formatK, appendGaps, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -177,6 +177,13 @@ let deferredId: string | undefined
 let isDeferWarned = false
 // Per agente, l'impronta dell'handoff della principale per cui ha già avuto la nota di pausa.
 const pausedFor = new Map<string, string>()
+// Ultimo evento visto di ogni agente (inizio/passo/tool/fine turno): oltre agentStaleMinutes senza eventi
+// un agente dato attivo non trattiene più il clear. 0 spegne la scadenza.
+const lastSeen = new Map<string, number>()
+const staleLogged = new Set<string>()
+const MAX_STALE_MINUTES = 1440
+let agentStaleMinutes = 30
+let staleTimer: Timer | undefined
 // Contesto dell'ultimo passo di ogni agente (turn.step), in token: le zone degli agenti sono in token assoluti.
 const agentTokens = new Map<string, number>()
 // Il percorso dell'handoff dato a ogni agente con la prima nota: resta quello anche dopo un /clear della principale.
@@ -324,6 +331,20 @@ const archive = async ($: EngineInterface, handoff: Handoff) => {
   const archived = await archiveCopy($, handoff)
   await $.fs.write(handoff.path, '')
   return archived
+}
+
+// Un Agent riuscito che riprende l'handoff di un subagent: il file resta in pending/ col suo testo (l'agente
+// in background può leggerlo dopo che next si risolve), segnato status: resumed, con una copia in archive/.
+const archiveResumed = async ($: EngineInterface, prompt: string) => {
+  const found = resumedHandoff(prompt)
+  if (found === undefined) return
+  const { root } = await paths($)
+  const handoff = await readHandoff($, `${root}/${found.path}`)
+  if (handoff === undefined) return
+  const resumed = { ...handoff, text: setFront(handoff.text, { status: 'resumed' }) }
+  const archived = await archiveCopy($, resumed)
+  await $.fs.write(handoff.path, resumed.text)
+  log($, `handoff dell'agente ${short(found.agentId)} ripreso: segnato resumed, copia in ${archived}`)
 }
 
 const runClear = ($: EngineInterface, canRetry: boolean) => {
@@ -931,16 +952,61 @@ const concludeValidation = async ($: EngineInterface, validatorId: string, answe
 
 // Gli agenti che trattengono il clear: pending/running/waiting. Un teammate idle, i validatori e gli agenti
 // avviati dalla mod non contano, né `ending`, l'agente al suo turn.complete (la lista può dirlo ancora running).
-const activeAgents = async ($: EngineInterface, ending?: string) =>
-  (await orElse($.agent.list(), [] as readonly AgentInfo[])).filter(
+const isPanelTeammate = (agent: AgentInfo) => agent.teammateId !== undefined && agent.id === agent.teammateId
+
+const activeAgents = async ($: EngineInterface, ending?: string) => {
+  const busy = (await orElse($.agent.list(), [] as readonly AgentInfo[])).filter(
     agent => BUSY.includes(agent.status) && !ownAgents.has(agent.id) && agent.type !== VALIDATOR && agent.id !== ending,
   )
+  const now = await $.clock.now()
+  return busy.filter(agent => {
+    // Teammate in un pannello separato: il suo ciclo non gira qui, nessun evento; conta solo l'elenco.
+    if (isPanelTeammate(agent)) return true
+    const seen = lastSeen.get(agent.id)
+    if (seen === undefined) {
+      lastSeen.set(agent.id, now)
+      return true
+    }
+    if (!isStale(seen, now, agentStaleMinutes)) return true
+    if (!staleLogged.has(agent.id)) {
+      staleLogged.add(agent.id)
+      log($, `agente ${short(agent.id)} senza attività da ${Math.floor((now - seen) / 60_000)} minuti: non trattiene più il clear`)
+    }
+    return false
+  })
+}
+
+// Un evento di un agente: torna attivo e potrà essere di nuovo segnalato come stantio.
+const markSeen = async ($: EngineInterface, agentId: string | undefined) => {
+  if (agentId === undefined) return
+  lastSeen.set(agentId, await $.clock.now())
+  staleLogged.delete(agentId)
+}
+
+// Un solo timer alla scadenza più vicina tra gli agenti che trattengono il clear: allo scadere si ricontrolla.
+const cancelStaleCheck = () => {
+  staleTimer?.cancel()
+  staleTimer = undefined
+}
+
+const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now: number) => {
+  cancelStaleCheck()
+  if (!(agentStaleMinutes > 0)) return
+  const expiring = busy.filter(agent => !isPanelTeammate(agent))
+  if (expiring.length === 0) return
+  const due = Math.min(...expiring.map(agent => (lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000))
+  staleTimer = $.clock.after(Math.max(1, due - now), () => {
+    staleTimer = undefined
+    tryClear($, 'agenti senza attività').catch((error: unknown) => log($, `clear non controllato: ${errorText(error)}`))
+  })
+}
 
 const resetDeferral = () => {
   deferredSince = undefined
   deferredId = undefined
   isDeferWarned = false
   pausedFor.clear()
+  cancelStaleCheck()
 }
 
 // Dopo 20 minuti di rinvio, un avviso una volta sola: il clear non si forza, perché l'effetto di /clear
@@ -981,10 +1047,12 @@ const tryClear = async ($: EngineInterface, reason: string, ending?: string) => 
     const now = await $.clock.now()
     const clears = ((await $.store.get(CLEARS_KEY)) as ClearRecord[] | undefined) ?? []
     if (clears.some(clear => clear.handoff === handoff.id)) {
+      cancelStaleCheck()
       log($, `l'handoff ${handoff.id} ha già avuto il suo clear: nessun nuovo clear`)
       return
     }
     if (clears.filter(clear => now - clear.at < HOUR_MS).length >= maxClearsPerHour) {
+      cancelStaleCheck()
       log($, `limite di ${maxClearsPerHour} clear in un'ora raggiunto: l'handoff ${handoff.id} resta in attesa`)
       return
     }
@@ -997,6 +1065,7 @@ const tryClear = async ($: EngineInterface, reason: string, ending?: string) => 
         log($, `handoff ${handoff.id} validato, ma ${busy.length} agenti ancora attivi: clear rimandato a quando si fermano (${reason})`)
       }
       await warnLongDeferral($)
+      scheduleStaleCheck($, busy, now)
       return
     }
 
@@ -1026,6 +1095,7 @@ export const register: Register = (on, options) => {
   maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
   maxRestartsPerHour = maxClearsPerHour
   agentsEnabled = options.agents !== false
+  agentStaleMinutes = Math.min(Number(options.agentStaleMinutes ?? 30), MAX_STALE_MINUTES)
   const tokenOption = (value: unknown, fallback: number) => {
     const n = Number(value ?? fallback)
     return Number.isFinite(n) ? n : fallback
@@ -1053,6 +1123,7 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.PostToolUse', async ($, e, next) => {
+    await markSeen($, e.agent_id)
     const result = await next(e)
     if (e.agent_id !== undefined) {
       const notes = [await agentZoneContext($, e.agent_id, configured, agentTokensLimits), await pauseContext($, e.agent_id)].filter(
@@ -1078,6 +1149,7 @@ export const register: Register = (on, options) => {
 
   // Streaming: i pezzi passano intatti; si legge solo l'usage del passo di un agente.
   on('turn.step', async function* ($, e, next) {
+    await markSeen($, e.agentId)
     const result = yield* next(e)
     const usage = result.usage
     if (e.agentId !== undefined && usage != null) {
@@ -1091,6 +1163,10 @@ export const register: Register = (on, options) => {
   // Un teammate avviato dal tool Agent: se ne tiene l'input, per rilanciarlo uguale. Solo osservazione.
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     const result = await next(e)
+    // Lo spawn è già avvenuto: gli errori dell'archiviazione restano nel log (mai un secondo next).
+    if (result.deny === undefined && result.isError !== true) {
+      await archiveResumed($, e.prompt).catch((error: unknown) => log($, `handoff ripreso non archiviato: ${errorText(error)}`))
+    }
     const record = result.result as { status?: string; agentId?: string; agent_id?: string } | undefined
     if (record?.status !== 'teammate_spawned') return result
     const agentId = record.agentId ?? record.agent_id
@@ -1120,14 +1196,16 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   // La principale in un turno: il clear aspetta la sua fine turno, anche se un agente si ferma prima.
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) isMainBusy = true
+    await markSeen($, e.agentId)
     return next(e)
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
     // Prima di next: se next lancia, la principale non resta "in un turno" per sempre.
     if (e.agentId === undefined) isMainBusy = false
+    await markSeen($, e.agentId)
     const result = await next(e)
     if (e.agentId !== undefined) {
       const agentId = e.agentId

@@ -124,3 +124,15 @@ export const leadFallback = (name: string, path: string, reason: string) =>
     `La mod auto-clear-context non è riuscita a rilanciare da sola il teammate «${name}» (${reason}); il suo handoff è validato in ${path}.`,
     `Fai così: 1) TaskStop sul teammate ${name}; 2) Agent con lo stesso name «${name}» nello stesso team, lo stesso tipo e lo stesso modello, e prompt «Riprendi dall'handoff ${path}».`,
   ].join(' ')
+
+// Un agente dato attivo ma senza eventi da `minutes` minuti è stantio. 0 spegne la scadenza.
+export const isStale = (lastSeen: number, now: number, minutes: number): boolean =>
+  minutes > 0 && now - lastSeen >= minutes * 60_000
+
+// Il percorso e l'id dell'agente dell'handoff di un subagent in un prompt «Riprendi dall'handoff …»;
+// undefined se manca o se è l'handoff di una principale (nome file senza "--").
+export const resumedHandoff = (prompt: string): { path: string; agentId: string } | undefined => {
+  const path = /Riprendi dall['’]handoff\s+\S*?(\.claude\/handoff\/pending\/[^\s/]+\.md)/i.exec(prompt)?.[1]
+  const agentId = path === undefined ? '' : agentIdOf(path)
+  return path !== undefined && agentId !== '' ? { path, agentId } : undefined
+}
