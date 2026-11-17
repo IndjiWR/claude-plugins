@@ -23,3 +23,10 @@ Opus, perché il validatore eredita il modello del lead.
 Test: le soglie in token scattano prima della percentuale (18/25/28% su 1M); quelle più alte della percentuale non
 cambiano nulla; col monitor spento non succede nulla; la nota arriva durante il turno; lo spawn del validatore ha
 `model: sonnet`. Suite verde, validate ok.
+
+## Note dalla review
+- La percentuale del motore è intera: una soglia in token scatta al primo punto percentuale intero che la raggiunge
+  (192k su 1M scatta a 20%, cioè ~200k). La precisione è ±1% della finestra.
+- Il pannello `/soglia` mostra e imposta solo le percentuali; le soglie in token effettive si vedono in
+  `context_usage` e nelle note.
+- Ogni soglia convertita vale almeno 0,1%: una soglia in token minuscola non spegne il monitor.

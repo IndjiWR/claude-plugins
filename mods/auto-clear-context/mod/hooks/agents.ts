@@ -38,7 +38,7 @@ export const agentZoneOf = (tokens: number, limits: Limits): 0 | 1 | 2 | 3 => {
 export const capByTokens = (limits: Limits, softTokens: number, hardTokens: number, window: number | undefined): Limits => {
   if (limits.soft <= 0 || !(softTokens > 0) || window === undefined || !(window > 0)) return limits
   const tokens = agentLimits(true, softTokens, hardTokens)
-  const pct = (value: number) => Math.round((value / window) * 1000) / 10
+  const pct = (value: number) => Math.max(0.1, Math.round((value / window) * 1000) / 10)
   return {
     soft: Math.min(limits.soft, pct(tokens.soft)),
     hard: Math.min(limits.hard, pct(tokens.hard)),
