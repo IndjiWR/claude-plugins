@@ -11,7 +11,7 @@ Leggi il file. Puoi usare Read, Glob e Grep per controllare che i file, le carte
 Controlla questi punti; ogni punto che non passa va in LACUNE, con cosa aggiungere:
 
 1. **Autosufficiente**: si capisce senza la conversazione precedente; niente rimandi a "sopra", "prima", "quel file".
-2. **Obiettivo** con un criterio "Fatto quando" verificabile.
+2. **Obiettivo** con un criterio "Fatto quando" verificabile (comando ed esito atteso) che copre tutto l'obiettivo, anche la parte ancora da fare.
 3. **Prossimo passo immediato**: una sola azione concreta che nomina file, simbolo o comando.
 4. **File reali**: ogni percorso in "Modifiche" e "Riferimenti" esiste (Glob/Grep); righe e simboli citati si trovano.
 5. **Git**: se il frontmatter ha `branch` e `head`, confrontali con `.git/HEAD` e il ref del branch (Read); se divergono è una lacuna.

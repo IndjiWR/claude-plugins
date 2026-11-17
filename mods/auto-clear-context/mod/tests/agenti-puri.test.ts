@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, appendGaps, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from '../hooks/agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, appendGaps, handoffModel, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from '../hooks/agents'
 
 const main = agentLimits(true, 120_000, 150_000)
 const path = '.claude/handoff/pending/s1--a7.md'
@@ -80,6 +80,9 @@ test("agentZoneNote: commit dei propri file prima dell'handoff", () => {
     expect(note).toContain('git add <file>')
     expect(note).toContain('mai git add -A')
     expect(note).toContain('non committati')
+    // Sezione del modello della skill, non un nome che il validatore non trova.
+    expect(note).toContain('in «Modifiche», alla riga «Non committato»')
+    expect(note).not.toContain('File toccati')
   }
   expect(agentZoneNote('teammate', 1, 130_000, main, path, 'x')).toContain(`HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo`)
 })
@@ -97,4 +100,66 @@ test("resumedHandoff: percorso dell'handoff di un subagent ripreso", () => {
   expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1.md")).toBe(undefined)
   expect(resumedHandoff('Fai qualcosa di diverso')).toBe(undefined)
   expect(resumedHandoff('riprendi dall’handoff .claude/handoff/pending/s1--a7.md')).toEqual(found)
+})
+
+// Fonti minime con la stessa forma di skills/handoff/SKILL.md e agents/handoff-validator.md.
+const skillSrc = [
+  '# Handoff', '', '1. passi', '2. **Raccogli i fatti, non andare a memoria**: `git status --short` e i test.', '   Ciò che non hai verificato va in ipotesi.', '3. **Scrivi** il file.', '', '## Formato', '', 'Ogni sezione è obbligatoria; se non ha contenuto scrivi "nessuno".', '',
+  '```markdown', '---', 'status: draft', 'session: ${CLAUDE_SESSION_ID}', 'rounds: 0', '---', '# Handoff: <titolo>', '',
+  '## Obiettivo', '- Fatto quando: <criterio>', '', '## Prossimo passo immediato', '<una sola azione concreta>', '```', '',
+  '## Regole', '', '- Autosufficiente', '- Solo fatti verificati', '', '## Variante agente', '', '- File: quello della nota',
+].join('\n')
+const validatorSrc = [
+  '---', 'name: handoff-validator', '---', '', 'Ricevi soltanto il percorso.', '',
+  'Controlla questi punti; ogni punto che non passa va in LACUNE, con cosa aggiungere:', '',
+  '1. **Autosufficiente**: niente rimandi.', '2. **Prossimo passo immediato**: una sola azione concreta.', '',
+  'Rispondi esattamente con queste sezioni:', '', 'VERDETTO: completo | da integrare',
+].join('\n')
+
+test('handoffModel: modello della skill e punti del validatore, frontmatter da agente', () => {
+  const model = handoffModel(skillSrc, validatorSrc, 'a7')
+  expect(model).toContain('Ogni sezione è obbligatoria')
+  expect(model).toContain('## Obiettivo')
+  expect(model).toContain('## Prossimo passo immediato\n<una sola azione concreta>')
+  expect(model).toContain('status: ready')
+  expect(model).toContain('agent: a7')
+  expect(model).not.toContain('status: draft')
+  expect(model).not.toContain('CLAUDE_SESSION_ID')
+  expect(model).toContain('1. **Autosufficiente**: niente rimandi.')
+  expect(model).toContain('2. **Prossimo passo immediato**: una sola azione concreta.')
+  expect(model).not.toContain('VERDETTO')
+  // Il passo «Raccogli i fatti» e le regole della skill, non la variante agente (la nota la riassume già).
+  expect(model).toContain('**Raccogli i fatti, non andare a memoria**: `git status --short` e i test.\n   Ciò che non hai verificato va in ipotesi.')
+  expect(model).not.toContain('**Scrivi** il file')
+  expect(model).toContain('- Autosufficiente\n- Solo fatti verificati')
+  expect(model).not.toContain('Variante agente')
+  expect(model).not.toContain('quello della nota')
+})
+
+test('handoffModel: punti del validatore solo dal blocco numerato, anche con CRLF e senza «Rispondi esattamente»', () => {
+  const tail = ['Controlla questi punti:', '', '1. **Uno**: a.', '2. **Due**: b.', '', 'Testo estraneo che non è un punto.'].join('\r\n')
+  const model = handoffModel(skillSrc.replace(/\n/g, '\r\n'), tail, 'a7')
+  expect(model).toContain('1. **Uno**: a.\n2. **Due**: b.')
+  expect(model).not.toContain('estraneo')
+  expect(model).toContain('agent: a7')
+  expect(model).toContain('## Prossimo passo immediato')
+})
+
+test('handoffModel: fonti mancanti o senza marcatori danno stringa vuota', () => {
+  expect(handoffModel('', validatorSrc, 'a7')).toBe('')
+  expect(handoffModel(skillSrc, '', 'a7')).toBe('')
+  expect(handoffModel('# Handoff senza formato', validatorSrc, 'a7')).toBe('')
+  expect(handoffModel(skillSrc, 'nessun elenco numerato', 'a7')).toBe('')
+})
+
+test('agentZoneNote: con il modello lo accoda e rimanda a quello', () => {
+  const model = handoffModel(skillSrc, validatorSrc, 'a7')
+  for (const kind of ['teammate', 'subagent'] as const) {
+    const note = agentZoneNote(kind, 1, 125_000, main, path, 'general-purpose', model)
+    expect(note).toContain(model)
+    expect(note).toContain('modello qui sotto, tutte le sezioni obbligatorie')
+    expect(note).not.toContain('nel formato della skill')
+  }
+  // Senza modello resta il rimando alla skill.
+  expect(agentZoneNote('teammate', 1, 125_000, main, path, 'general-purpose')).toContain('nel formato della skill auto-clear-context:handoff')
 })
