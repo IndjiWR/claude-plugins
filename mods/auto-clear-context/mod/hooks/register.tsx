@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage, Timer } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, formatK, appendGaps, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, formatK, appendGaps, handoffModel, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -744,6 +744,13 @@ const findAgentHandoff = async ($: EngineInterface, agentId: string): Promise<Ha
   return newest === undefined ? undefined : readHandoff($, `${dir}/${newest.name}`)
 }
 
+// Il modello d'handoff dalle fonti che usano la skill e il validatore, lette a ogni nota: niente copie che divergono.
+const agentModel = async ($: EngineInterface, agentId: string) => {
+  const root = $.plugin.root.replace(/[\\/]+$/, '')
+  const [skill, validator] = await Promise.all([readText($, `${root}/skills/handoff/SKILL.md`), readText($, `${root}/agents/handoff-validator.md`)])
+  return handoffModel(skill, validator, agentId)
+}
+
 // La nota di zona per un agente, una volta per zona: il suo handoff lo scrive lui.
 const agentZoneContext = async ($: EngineInterface, agentId: string, configured: Pair, agentTokensLimits: { soft: number; hard: number }): Promise<string | undefined> => {
   const tokens = agentTokens.get(agentId)
@@ -759,8 +766,9 @@ const agentZoneContext = async ($: EngineInterface, agentId: string, configured:
   if (!(await markSignaled($, `agent:${agentId}`, zone))) return undefined
   const path = agentPaths.get(agentId) ?? agentHandoffPath(await $.session.id(), agentId)
   agentPaths.set(agentId, path)
-  log($, `agente ${short(agentId)} a ~${formatK(tokens)} token (${ZONE_NAMES[zone]}): nota di handoff`)
-  return agentZoneNote(kindOf(info), zone, tokens, limits, path, info.type)
+  const model = await agentModel($, agentId)
+  log($, `agente ${short(agentId)} a ~${formatK(tokens)} token (${ZONE_NAMES[zone]}): nota di handoff${model === '' ? ', senza modello (skill o validatore illeggibili)' : ''}`)
+  return agentZoneNote(kindOf(info), zone, tokens, limits, path, info.type, model)
 }
 
 // Le note durante il turno, dopo il risultato di un tool: a un agente la sua zona e la

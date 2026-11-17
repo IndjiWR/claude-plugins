@@ -42,12 +42,45 @@ const agentIdOf = (path: string) => /--([^/]+)\.md$/.exec(path)?.[1] ?? ''
 
 // Passo fisso: l'agente committa i propri file prima di scrivere l'handoff.
 export const COMMIT_STEP =
-  "Prima di scrivere l'handoff committa i file che hai modificato tu, per nome (git add <file>…; mai git add -A né git add .; mai i file di .claude/handoff/), con un messaggio che dica il punto raggiunto. Se non puoi (test rossi, file in comune con altri, permesso negato, niente repo git), elenca nell'handoff, in «File toccati», i file non committati e il motivo."
+  "Prima di scrivere l'handoff committa i file che hai modificato tu, per nome (git add <file>…; mai git add -A né git add .; mai i file di .claude/handoff/), con un messaggio che dica il punto raggiunto. Se non puoi (test rossi, file in comune con altri, permesso negato, niente repo git), elenca nell'handoff, in «Modifiche», alla riga «Non committato», i file non committati e il motivo."
+
+// Il modello d'handoff per un agente, letto dalle stesse fonti del flusso: da skills/handoff/SKILL.md la sezione
+// «## Formato» (preambolo e blocco markdown, col frontmatter da agente), il passo «Raccogli i fatti» e «## Regole»,
+// da agents/handoff-validator.md i punti numerati che il validatore controlla. '' se una fonte manca o non ha i marcatori: la nota rimanda alla skill.
+export const handoffModel = (skillText: string, validatorText: string, agentId: string): string => {
+  const skill = skillText.replace(/\r\n/g, '\n')
+  const format = /^## Formato[ \t]*\n([\s\S]*?)^```markdown[ \t]*\n([\s\S]*?)^```[ \t]*$/m.exec(skill)
+  // I punti del validatore: il primo blocco numerato dopo «Controlla questi punti».
+  const after = /^Controlla questi punti[^\n]*\n([\s\S]*)/m.exec(validatorText.replace(/\r\n/g, '\n'))?.[1] ?? ''
+  const points = /^\d+\. [^\n]*(?:\n(?:\d+\. |[ \t]+\S)[^\n]*)*/m.exec(after)?.[0] ?? ''
+  if (format === null || points === '') return ''
+  // Dalla skill anche il passo «Raccogli i fatti» (con le sue righe rientrate) e la sezione «## Regole».
+  const facts = /^\d+\. (\*\*Raccogli i fatti[^\n]*(?:\n[ \t]+\S[^\n]*)*)/m.exec(skill)?.[1] ?? ''
+  const rules = /^## Regole[ \t]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(skill)?.[1]?.trim() ?? ''
+  const preamble = (format[1] ?? '').trim()
+  const template = (format[2] ?? '')
+    .replace(/^status: draft[ \t]*$/m, 'status: ready')
+    .replace(/^session: .*$/m, `agent: ${agentId}`)
+    .trimEnd()
+  return [
+    `Modello d'handoff richiesto dal validatore (dalla skill auto-clear-context:handoff). ${preamble}`,
+    ...(facts === '' ? [] : [`Prima di scrivere: ${facts}`]),
+    '```markdown',
+    template,
+    '```',
+    ...(rules === '' ? [] : ['Regole:', rules]),
+    'Il validatore controlla questi punti; ognuno che non passa è una lacuna e ti rimanda indietro:',
+    points,
+  ].join('\n')
+}
+
+const withModel = (model: string) => (model === '' ? '' : `\n\n${model}`)
 
 const levels = (limits: Limits) => `${formatK(limits.soft)}/${formatK(limits.hard)}, margine di sicurezza a ${formatK(limits.margin)}`
 
 // La nota che la mod allega a un agente quando il suo contesto entra in una zona.
-export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, limits: Limits, path: string, type: string): string => {
+// Con `model` (handoffModel) la nota rimanda al modello e lo accoda; senza, rimanda alla skill.
+export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, limits: Limits, path: string, type: string, model = ''): string => {
   const seen = `La mod auto-clear-context rileva il contesto di questo agente a ~${formatK(tokens)} token (soglie ${levels(limits)})`
   const when =
     zone === 3
@@ -60,19 +93,23 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, 
       `${seen}.`,
       when,
       COMMIT_STEP,
-      `Scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff (stato, decisioni, file toccati, prossimo passo, «Verifica alla ripresa»), con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`,
+      model === ''
+        ? `Scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff (stato, decisioni, file toccati, prossimo passo, «Verifica alla ripresa»), con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`
+        : `Scrivi l'handoff in ${path} con il modello qui sotto, tutte le sezioni obbligatorie, con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`,
       `Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con la sola riga «HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo».`,
       'La mod ferma questo teammate e lo rilancia con lo stesso nome, tipo e modello, dandogli l\'handoff come prompt.',
-    ].join(' ')
+    ].join(' ') + withModel(model)
   }
   return [
     `${seen}.`,
     when,
     COMMIT_STEP,
     'Se il compito si chiude in pochi passi, finiscilo e rispondi come al solito.',
-    `Altrimenti scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff, con status: ready e agent: ${agentIdOf(path)} nel frontmatter, e controllalo da solo sui punti del validatore (ripartire dal solo file: obiettivo, decisioni, file, prossimo passo, verifica alla ripresa, nessun riferimento alla conversazione).`,
+    model === ''
+      ? `Altrimenti scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff, con status: ready e agent: ${agentIdOf(path)} nel frontmatter, e controllalo da solo sui punti del validatore (ripartire dal solo file: obiettivo, decisioni, file, prossimo passo, verifica alla ripresa, nessun riferimento alla conversazione).`
+      : `Altrimenti scrivi l'handoff in ${path} con il modello qui sotto, tutte le sezioni obbligatorie, con status: ready e agent: ${agentIdOf(path)} nel frontmatter, e controllalo da solo sui punti del validatore elencati sotto.`,
     `La risposta finale è una sola riga per chi ti ha lanciato: HANDOFF ${path}: rilancia un subagent ${type} con prompt «Riprendi dall'handoff ${path}».`,
-  ].join(' ')
+  ].join(' ') + withModel(model)
 }
 
 // Nota agli agenti attivi quando la principale sta per ripartire con /clear.

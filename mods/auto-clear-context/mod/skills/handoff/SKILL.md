@@ -41,7 +41,7 @@ head: <sha corto di HEAD>
 
 ## Obiettivo
 <che cosa si costruisce e perché, 2-4 righe>
-- Fatto quando: <criterio verificabile di completamento>
+- Fatto quando: <criterio verificabile di tutto l'obiettivo, compresa la parte ancora da fare: comando ed esito atteso>
 
 ## Vincoli dell'utente
 - "<vincolo citato parola per parola>"
@@ -108,7 +108,7 @@ head: <sha corto di HEAD>
 Vale quando la nota di zona arriva a un subagent o a un teammate (non alla sessione principale) e indica il percorso del file. Sostituisce i passi 3-6: un agente non scrive `${CLAUDE_SESSION_ID}.md` (è il file della principale; con `agent:` nel frontmatter la mod lo ignora).
 
 - **File**: quello della nota, `.claude/handoff/pending/<sessione>--<id agente>.md`, non `${CLAUDE_SESSION_ID}.md`. Stesso formato, ma frontmatter `status: ready` (non `draft`) e `agent: <id agente>`.
-- **Commit**: prima di scrivere l'handoff committa i file che hai modificato tu, per nome (`git add <file>…`; mai `git add -A` né `git add .`; mai i file di `.claude/handoff/`), con un messaggio che dica il punto raggiunto. Se non puoi (test rossi, file in comune con altri, permesso negato, niente repo git), elenca nell'handoff, in «File toccati», i file non committati e il motivo.
+- **Commit**: prima di scrivere l'handoff committa i file che hai modificato tu, per nome (`git add <file>…`; mai `git add -A` né `git add .`; mai i file di `.claude/handoff/`), con un messaggio che dica il punto raggiunto. Se non puoi (test rossi, file in comune con altri, permesso negato, niente repo git), elenca nell'handoff, in «Modifiche», alla riga «Non committato», i file non committati e il motivo.
 - **Teammate**: non lanciare il validatore e non segnare `validated`. Scrivi il file, chiudi il turno con la sola riga `HANDOFF <percorso>: la mod valida e rilancia questo teammate, non riprendere da solo`: la mod lo valida, ferma il teammate e lo rilancia con lo stesso nome, tipo e modello (non l'effort), dandogli l'handoff come prompt.
 - **Subagent**: la mod non lo valida. Controlla il file da solo sui punti del validatore e rispondi con una sola riga: `HANDOFF <percorso>: rilancia un subagent <tipo> con prompt «Riprendi dall'handoff <percorso>»`. Chi ti ha lanciato rilancia.
 - Se il compito si chiude in pochi passi, finiscilo e rispondi come al solito. Niente `/clear` dentro un agente.

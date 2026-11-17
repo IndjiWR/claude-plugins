@@ -78,7 +78,9 @@ const world = (
       await hook.action()
     }
     state.reads.set(fileKey(e.path), (state.reads.get(fileKey(e.path)) ?? 0) + 1)
-    const text = state.files.get(fileKey(e.path))
+    // I file del plugin (chiave «plugin:/skills/…»): letti sotto la sua radice, qualunque sia.
+    const own = [...state.files.entries()].find(([key]) => key.startsWith('plugin:') && e.path.replace(/\\/g, '/').endsWith(key.slice('plugin:'.length)))
+    const text = state.files.get(fileKey(e.path)) ?? own?.[1]
     return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
   })
   on('fs.write', (_, e) => {
@@ -177,6 +179,26 @@ test('teammate: la nota chiede status ready e non lancia il validatore', async (
   expect(note).toContain('s1--a1.md')
   expect(note).toContain('status: ready')
   expect(note).toContain('Non lanciare il validatore')
+})
+
+const skillSrc = ['## Formato', '', 'Ogni sezione è obbligatoria.', '', '```markdown', '---', 'status: draft', 'session: x', '---', '## Prossimo passo immediato', '<una sola azione>', '```'].join('\n')
+const validatorSrc = ['Controlla questi punti:', '', '1. **Prossimo passo immediato**: una sola azione concreta.', '', 'Rispondi esattamente con queste sezioni:'].join('\n')
+
+test('teammate: la nota porta il modello letto da skill e validatore del plugin', async ($, on) => {
+  const state = world(on, [{ id: 'a1', teammateId: 'pose@t', type: 'general-purpose', description: 'x', status: 'running' }])
+  state.files.set('plugin:/skills/handoff/SKILL.md', skillSrc)
+  state.files.set('plugin:/agents/handoff-validator.md', validatorSrc)
+  const [note] = await step($, state, 125_000)
+  expect(note).toContain('modello qui sotto')
+  expect(note).toContain('## Prossimo passo immediato\n<una sola azione>')
+  expect(note).toContain('agent: a1')
+  expect(note).toContain('1. **Prossimo passo immediato**: una sola azione concreta.')
+})
+
+test('teammate: senza le fonti del plugin la nota rimanda alla skill', async ($, on) => {
+  const state = world(on, [{ id: 'a1', teammateId: 'pose@t', type: 'general-purpose', description: 'x', status: 'running' }])
+  const [note] = await step($, state, 125_000)
+  expect(note).toContain('nel formato della skill auto-clear-context:handoff')
 })
 
 test('dopo un /clear della principale (id nuovo) l agente tiene percorso e zone già segnalate', async ($, on) => {
