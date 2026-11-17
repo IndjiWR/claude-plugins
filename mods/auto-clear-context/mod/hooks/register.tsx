@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage, Timer } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, formatK, appendGaps, handoffModel, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, capByTokens, formatK, appendGaps, handoffModel, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -56,6 +56,8 @@ const RESTARTS_KEPT = 20
 const EVENTS_KEPT = 300
 const BUSY = ['pending', 'running', 'waiting']
 const DEFER_WARN_MS = 20 * 60_000
+// Soglie in token della principale (userConfig mainSoftTokens/mainHardTokens); 0 = solo percentuali.
+let mainTokens = { soft: 0, hard: 0 }
 
 const PANE = 'soglia'
 const PANE_ROWS = 20
@@ -204,6 +206,7 @@ let maxClearsPerHour = 3
 const restarting = new Set<string>()
 const handedToLead = new Set<string>()
 const VALIDATOR = 'auto-clear-context:handoff-validator'
+const VALIDATOR_MODEL = 'sonnet'
 const AGENT_INPUTS = { plugin: 'auto-clear-context', key: 'agentInputs' } as const
 // Dopo un /clear (la sessione che ha chiuso, perché la nuova ha già un altro id) o un
 // compact (la sessione stessa): di chi è l'handoff che il prossimo prompt allega.
@@ -549,7 +552,12 @@ const readSettings = async ($: EngineInterface, configured: Pair): Promise<Setti
   }
 }
 
-const effectiveLimits = async ($: EngineInterface, configured: Pair) => limitsOf((await readSettings($, configured)).inForce)
+// Le soglie in vigore in percentuale, abbassate dalle soglie in token della principale se configurate.
+const effectiveLimits = async ($: EngineInterface, configured: Pair) => {
+  const limits = limitsOf((await readSettings($, configured)).inForce)
+  if (limits.soft <= 0 || mainTokens.soft <= 0) return limits
+  return capByTokens(limits, mainTokens.soft, mainTokens.hard, (await readUsage($))?.context.window)
+}
 
 // Prende la scrittura in sospeso, una volta sola anche se il modulo vecchio e
 // quello ricaricato ci provano insieme.
@@ -938,6 +946,8 @@ const checkTeammate = async ($: EngineInterface, agentId: string) => {
     const round = Math.max(roundsOf(handoff.text), doneRounds.get(agentId) ?? 0) + 1
     const spawned = await $.agent.spawn({
       subagentType: VALIDATOR,
+      // Esplicito: senza, il validatore eredita il modello del lead. L'effort (low) sta nella definizione dell'agent.
+      model: VALIDATOR_MODEL,
       description: `Valida l'handoff di ${short(agentId)}`,
       prompt: path,
     })
@@ -1153,6 +1163,7 @@ export const register: Register = (on, options) => {
     const n = Number(value ?? fallback)
     return Number.isFinite(n) ? n : fallback
   }
+  mainTokens = { soft: tokenOption(options.mainSoftTokens, 0), hard: tokenOption(options.mainHardTokens, 0) }
   const agentTokensLimits = {
     soft: tokenOption(options.agentSoftTokens, 120_000),
     hard: tokenOption(options.agentHardTokens, 150_000),

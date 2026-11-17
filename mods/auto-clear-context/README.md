@@ -20,7 +20,7 @@ The mod nudges, it does not force: it adds a note to Claude's context once per z
 | --- | --- |
 | Hooks module (`mod/hooks/register.tsx`) | Measures context usage, tells Claude when it enters a zone, runs `/clear` and the resume; registers the `/soglia` command and the `context_usage` tool |
 | Skill `auto-clear-context:handoff` (`mod/skills/handoff/`) | Writes the session's own `.claude/handoff/pending/<session id>.md`, has it checked by the validator, marks it `status: validated` |
-| Agent `auto-clear-context:handoff-validator` (`mod/agents/`) | Read-only subagent (Read, Glob, Grep): rebuilds the work from the handoff alone and checks it against a 12-point checklist (self-contained, git state, real paths, resume checks, verified facts vs assumptions, skills and tools by exact name) |
+| Agent `auto-clear-context:handoff-validator` (`mod/agents/`) | Read-only subagent (Read, Glob, Grep): rebuilds the work from the handoff alone and checks it against a 12-point checklist (self-contained, git state, real paths, resume checks, verified facts vs assumptions, skills and tools by exact name); runs on `model: sonnet`, `effort: low` from its definition, and the mod also passes the model explicitly, so it does not inherit the lead's model |
 
 ### How it works
 
@@ -91,6 +91,8 @@ Update with `claude plugin update auto-clear-context`.
 | --- | --- | --- | --- |
 | `threshold` | 40 | 0, or 1–85 and at least 10 below hard | soft zone (%); `0` turns the monitor off |
 | `hardThreshold` | 60 | soft + 10 to 95 | hard zone (%) |
+| `mainSoftTokens` | 0 | — | main session soft zone in tokens too, whichever comes first (hard `mainHardTokens`, at least +30k; margin +30k); `0` = percent only |
+| `mainHardTokens` | 0 | — | main session hard zone in tokens |
 | `agents` | on | — | monitor subagents and teammates too |
 | `agentSoftTokens` | 120000 | — | agents' soft zone, in tokens; `0` = no zone notes to agents |
 | `agentHardTokens` | 150000 | — | agents' hard zone, in tokens (margin = hard + 30000) |
@@ -204,7 +206,7 @@ Mod per **Claude Code** che gestisce da sola le conversazioni lunghe. Quando il 
 | --- | --- |
 | Mod (`mod/hooks/register.tsx`) | Misura il contesto, avvisa Claude quando entra in una zona, esegue `/clear` e la ripresa; comando `/soglia`; tool `context_usage` |
 | Skill `auto-clear-context:handoff` (`mod/skills/handoff/`) | Scrive il file della sessione, `.claude/handoff/pending/<id della sessione>.md`, lo fa validare e lo segna come validato |
-| Agent `auto-clear-context:handoff-validator` (`mod/agents/`) | Subagent in sola lettura: ricostruisce il lavoro dal solo handoff e lo verifica con 12 controlli (autosufficienza, stato git, percorsi reali, verifica alla ripresa, fatti separati dalle ipotesi, skill e strumenti col nome esatto) |
+| Agent `auto-clear-context:handoff-validator` (`mod/agents/`) | Subagent in sola lettura: ricostruisce il lavoro dal solo handoff e lo verifica con 12 controlli (autosufficienza, stato git, percorsi reali, verifica alla ripresa, fatti separati dalle ipotesi, skill e strumenti col nome esatto); gira su `model: sonnet`, `effort: low` dalla sua definizione, e la mod passa anche il modello esplicito, così non eredita quello del lead |
 
 ### Come funziona
 
@@ -295,6 +297,7 @@ Il plugin viene letto da quella cartella: non spostarla e non cancellarla.
   - `/soglia 45` imposta la morbida;
   - `/soglia 45 65` imposta morbida e dura;
   - `/soglia 0` spegne il monitor.
+- **Soglie in token per la principale** (da `/config` o dalle settings del progetto): `mainSoftTokens` e `mainHardTokens` (default 0, spente) aggiungono soglie assolute; per ogni zona vale quella che arriva prima fra percentuale e token (dura almeno morbida + 30k, margine 30k sopra la dura). Utile con finestre da 1M, dove il 40% scatta a 400k.
 - **Handoff a mano.** Chiedi a Claude: "usa la skill auto-clear-context:handoff".
 - **Contesto attuale.** Claude può controllarlo con il tool `context_usage` della mod.
 

@@ -2,6 +2,8 @@
 name: handoff-validator
 description: Verifica un handoff di contesto ricostruendo il lavoro dal solo file. Sola lettura.
 tools: Read, Glob, Grep
+model: sonnet
+effort: low
 ---
 
 Ricevi soltanto il percorso di un file di handoff, scritto perché un'altra sessione riprenda il lavoro senza nessun altro contesto.
