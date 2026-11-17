@@ -47,7 +47,7 @@ const world = (
     // L'id della principale (cambia col /clear) e un'azione da fare alla prossima lettura di un file.
     session: 's1',
     beforeRead: undefined as { key: string; action: () => Promise<unknown> } | undefined,
-    spawns: [] as { subagentType?: string; prompt: string; name?: string; description?: string }[],
+    spawns: [] as { subagentType?: string; prompt: string; name?: string; description?: string; model?: string }[],
     logs: [] as string[],
     throws: new Set<string>(),
     // Se impostato, la risposta del fondo di tool.call di Agent (un teammate avviato dal modello).
@@ -98,10 +98,10 @@ const world = (
   // $.agent.spawn della mod: l'input arriva nella forma del tool Agent (subagent_type). Il motore di prova
   // non dà l'id dell'agente avviato: la mod lo trova in agent.list, dove stanno i validatori v1 e v2.
   on('agent.spawn', (_, e) => {
-    const call = e as unknown as { prompt: string; subagent_type?: string; name?: string; description?: string }
+    const call = e as unknown as { prompt: string; subagent_type?: string; name?: string; description?: string; model?: string }
     const refusal = state.denied.get('agent.spawn')
     if (refusal !== undefined) return { deny: refusal } as never
-    state.spawns.push({ subagentType: call.subagent_type, prompt: call.prompt, name: call.name, description: call.description })
+    state.spawns.push({ subagentType: call.subagent_type, prompt: call.prompt, name: call.name, description: call.description, model: call.model })
     if (call.name !== undefined) {
       const listed = { id: `n${state.spawns.length}`, name: call.name, type: 'general-purpose', description: 'r', status: 'running' }
       state.spawnedAgents.push(state.isSpawnTeammate ? { ...listed, teammateId: `${call.name}@t` } : listed)
@@ -317,6 +317,8 @@ test('teammate con handoff ready: un solo validatore, anche al secondo turn.comp
   await turnEnd($, 'a1')
   expect(state.spawns.length).toBe(1)
   expect(state.spawns[0]?.subagentType).toBe('auto-clear-context:handoff-validator')
+  // Modello esplicito: senza, il validatore eredita quello del lead (Opus).
+  expect(state.spawns[0]?.model).toBe('sonnet')
   expect(state.spawns[0]?.prompt).toContain(FILE)
   await turnEnd($, 'a1')
   expect(state.spawns.length).toBe(1)

@@ -299,3 +299,35 @@ test('context_usage col monitor spento', { options: { threshold: 0 } }, async ($
   state.percent = 23
   expect((await $.tool.call({ tool: TOOL })).result).toBe('23% · monitor spento')
 })
+
+test('soglie in token della principale: scatta la prima fra percentuale e token', { options: { mainSoftTokens: 180_000, mainHardTokens: 250_000 } }, async ($, on) => {
+  const { state } = world(on)
+  const line = async (percent: number) => {
+    state.percent = percent
+    return (await $.tool.call({ tool: TOOL })).result
+  }
+  // Finestra da 1M: 180k = 18%, 250k = 25%, margine 30k sopra la dura = 28%.
+  expect(await line(17)).toBe('17% · zona normale (18/25%)')
+  expect(await line(20)).toBe('20% · zona morbida (18/25%)')
+  expect(await line(26)).toBe('26% · zona dura (18/25%)')
+  expect(await line(29)).toBe('29% · margine di sicurezza superato (18/25/28%)')
+})
+
+test('soglie in token più alte della percentuale: vale la percentuale', { options: { mainSoftTokens: 600_000, mainHardTokens: 0 } }, async ($, on) => {
+  const { state } = world(on)
+  state.percent = 45
+  // Dura in token: morbida + 30k (630k = 63%), oltre la dura in percentuale (60%).
+  expect((await $.tool.call({ tool: TOOL })).result).toBe('45% · zona morbida (40/60%)')
+})
+
+test('soglie in token col monitor spento: resta spento', { options: { threshold: 0, mainSoftTokens: 180_000 } }, async ($, on) => {
+  const { state } = world(on)
+  state.percent = 30
+  expect((await $.tool.call({ tool: TOOL })).result).toBe('30% · monitor spento')
+})
+
+test('soglia in token: la nota della morbida arriva durante il turno', { options: { mainSoftTokens: 180_000 } }, async ($, on) => {
+  const { state, clock } = world(on)
+  const [note] = await viaTool($, clock, 20, state)
+  expect(note).toContain('zona morbida (soglie 18/21%')
+})

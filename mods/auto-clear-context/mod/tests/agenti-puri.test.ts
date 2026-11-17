@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, appendGaps, handoffModel, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from '../hooks/agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, appendGaps, capByTokens, handoffModel, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from '../hooks/agents'
 
 const main = agentLimits(true, 120_000, 150_000)
 const path = '.claude/handoff/pending/s1--a7.md'
@@ -162,4 +162,21 @@ test('agentZoneNote: con il modello lo accoda e rimanda a quello', () => {
   }
   // Senza modello resta il rimando alla skill.
   expect(agentZoneNote('teammate', 1, 125_000, main, path, 'general-purpose')).toContain('nel formato della skill auto-clear-context:handoff')
+})
+
+test('capByTokens: per ogni livello la più bassa fra percentuale e token', () => {
+  const pct = { soft: 40, hard: 60, margin: 75 }
+  expect(capByTokens(pct, 180_000, 250_000, 1_000_000)).toEqual({ soft: 18, hard: 25, margin: 28 })
+  // Dura in token non oltre la morbida: morbida + 30k; decimali a 0,1.
+  expect(capByTokens(pct, 192_000, 0, 1_000_000)).toEqual({ soft: 19.2, hard: 22.2, margin: 25.2 })
+  // Token oltre le percentuali: restano le percentuali.
+  expect(capByTokens(pct, 900_000, 950_000, 1_000_000)).toEqual(pct)
+  // Spente, monitor spento, finestra ignota o nulla: nessun cambio.
+  expect(capByTokens(pct, 0, 250_000, 1_000_000)).toEqual(pct)
+  expect(capByTokens({ soft: 0, hard: 10, margin: 25 }, 180_000, 0, 1_000_000)).toEqual({ soft: 0, hard: 10, margin: 25 })
+  expect(capByTokens(pct, 180_000, 0, undefined)).toEqual(pct)
+  expect(capByTokens(pct, 180_000, 0, 0)).toEqual(pct)
+  expect(capByTokens(pct, Number.NaN, 0, 1_000_000)).toEqual(pct)
+  // Una soglia in token minuscola non spegne il monitor: almeno 0,1%.
+  expect(capByTokens(pct, 40, 0, 1_000_000).soft).toBe(0.1)
 })

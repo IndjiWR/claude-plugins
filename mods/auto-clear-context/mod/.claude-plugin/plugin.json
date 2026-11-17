@@ -1,6 +1,6 @@
 {
   "name": "auto-clear-context",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Vicino alle soglie di contesto (morbida, dura, margine di sicurezza) Claude salva lo stato in un handoff validato; la mod esegue /clear e fa ripartire il lavoro nella sessione pulita.",
   "author": { "name": "Indji" },
   "types": "./types/index.d.ts",
@@ -22,6 +22,18 @@
       "title": "Clear automatici per ora",
       "description": "Quanti clear automatici la mod esegue al massimo in un'ora.",
       "default": 3
+    },
+    "mainSoftTokens": {
+      "type": "number",
+      "title": "Soglia morbida della principale (token)",
+      "description": "Token di contesto della sessione principale da cui scatta la zona morbida, oltre alla percentuale: vale la soglia che arriva prima. Dura a mainHardTokens (almeno +30000), margine 30000 sopra. 0 la spegne.",
+      "default": 0
+    },
+    "mainHardTokens": {
+      "type": "number",
+      "title": "Soglia dura della principale (token)",
+      "description": "Token da cui scatta la zona dura della principale; se non supera la morbida in token vale morbida + 30000.",
+      "default": 0
     },
     "agents": {
       "type": "boolean",
