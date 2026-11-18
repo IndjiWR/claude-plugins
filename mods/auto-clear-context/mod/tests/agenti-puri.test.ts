@@ -105,7 +105,7 @@ test("resumedHandoff: percorso dell'handoff di un subagent ripreso", () => {
 // Fonti minime con la stessa forma di skills/handoff/SKILL.md e agents/handoff-validator.md.
 const skillSrc = [
   '# Handoff', '', '1. passi', '2. **Raccogli i fatti, non andare a memoria**: `git status --short` e i test.', '   Ciò che non hai verificato va in ipotesi.', '3. **Scrivi** il file.', '', '## Formato', '', 'Ogni sezione è obbligatoria; se non ha contenuto scrivi "nessuno".', '',
-  '```markdown', '---', 'status: draft', 'session: ${CLAUDE_SESSION_ID}', 'rounds: 0', '---', '# Handoff: <titolo>', '',
+  '```markdown', '---', 'status: draft', 'session: ${CLAUDE_SESSION_ID}', 'rounds: 0', 'mode: <solo per una pausa>', '---', '# Handoff: <titolo>', '',
   '## Obiettivo', '- Fatto quando: <criterio>', '', '## Prossimo passo immediato', '<una sola azione concreta>', '```', '',
   '## Regole', '', '- Autosufficiente', '- Solo fatti verificati', '', '## Variante agente', '', '- File: quello della nota',
 ].join('\n')
@@ -125,6 +125,7 @@ test('handoffModel: modello della skill e punti del validatore, frontmatter da a
   expect(model).toContain('agent: a7')
   expect(model).not.toContain('status: draft')
   expect(model).not.toContain('CLAUDE_SESSION_ID')
+  expect(model).not.toContain('mode:')
   expect(model).toContain('1. **Autosufficiente**: niente rimandi.')
   expect(model).toContain('2. **Prossimo passo immediato**: una sola azione concreta.')
   expect(model).not.toContain('VERDETTO')

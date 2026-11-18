@@ -75,6 +75,8 @@ export const handoffModel = (skillText: string, validatorText: string, agentId: 
   const template = (format[2] ?? '')
     .replace(/^status: draft[ \t]*$/m, 'status: ready')
     .replace(/^session: .*$/m, `agent: ${agentId}`)
+    // `mode: pausa` vale solo per la principale: niente rumore nella nota agli agenti.
+    .replace(/^mode: .*\n/m, '')
     .trimEnd()
   return [
     `Modello d'handoff richiesto dal validatore (dalla skill auto-clear-context:handoff). ${preamble}`,
