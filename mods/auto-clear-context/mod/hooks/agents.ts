@@ -179,6 +179,9 @@ export const leadFallback = (name: string, path: string, reason: string) =>
     `Fai così: 1) TaskStop sul teammate ${name}; 2) Agent con lo stesso name «${name}» nello stesso team, lo stesso tipo e lo stesso modello, e prompt «Riprendi dall'handoff ${path}».`,
   ].join(' ')
 
+export const leadPauseFallback = (name: string, path: string, reason: string) =>
+  `La mod auto-clear-context non è riuscita a fermare il teammate «${name}» (${reason}): il suo handoff di pausa è validato in ${path}. Fai TaskStop sul teammate ${name} e non rilanciarlo: si riprende più tardi da quel file.`
+
 // Un agente dato attivo ma senza eventi da `minutes` minuti è stantio. 0 spegne la scadenza.
 export const isStale = (lastSeen: number, now: number, minutes: number): boolean =>
   minutes > 0 && now - lastSeen >= minutes * 60_000

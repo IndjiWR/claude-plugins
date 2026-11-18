@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage, Timer } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, capByTokens, formatK, appendGaps, handoffModel, isStale, leadFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, capByTokens, formatK, appendGaps, handoffModel, isStale, leadFallback, leadPauseFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -888,9 +888,9 @@ const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handof
       log($, `handoff ${handoff.id} validato, ma il teammate ${short(agentId)} è ${info.status}: rilancio al suo prossimo fine turno`)
       return
     }
-    if (handoff.mode === PAUSE_MODE) return await pauseAgent($, agentId, handoff)
     const input = await orElse(read($, { ...AGENT_INPUTS, id: agentId }), undefined)
     const name = input?.name ?? info.teammateId?.split('@')[0] ?? agentId
+    if (handoff.mode === PAUSE_MODE) return await pauseAgent($, agentId, name, handoff)
     // Ogni rilancio dà un id nuovo: il tetto e il dedupe contano per una chiave stabile (nome, teammateId, id).
     const key = input?.name ?? info.teammateId ?? agentId
     const now = await $.clock.now()
@@ -948,18 +948,29 @@ const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handof
 }
 
 // Handoff di pausa di un teammate: copia in archive/, TaskStop e file svuotato, ma nessun rilancio.
-const pauseAgent = async ($: EngineInterface, agentId: string, handoff: Handoff) => {
-  const archived = await archiveCopy($, handoff)
-  let stopNote = ''
+// Se TaskStop non riesce il file resta in pending/ e la principale riceve, una volta, la richiesta di fermarlo.
+const pauseAgent = async ($: EngineInterface, agentId: string, name: string, handoff: Handoff) => {
+  let refused: string | undefined
   try {
-    const refused = refusalOf(await $.tool.call({ tool: 'TaskStop', task_id: agentId }))
-    if (refused !== undefined) stopNote = ` (TaskStop non riuscito: ${refused})`
+    refused = refusalOf(await $.tool.call({ tool: 'TaskStop', task_id: agentId }))
   } catch (error) {
-    stopNote = ` (TaskStop non riuscito: ${errorText(error)})`
+    refused = errorText(error)
   }
+  if (refused !== undefined) {
+    handedToLead.add(handoff.id)
+    log($, `teammate ${short(agentId)} in pausa: TaskStop non riuscito (${refused}); istruzioni alla principale, l'handoff resta in pending/`)
+    $.prompt.submit({ text: leadPauseFallback(name, relativePath(handoff.path), refused) }).then(
+      submitted => {
+        if (submitted.drop !== undefined) log($, `istruzioni di pausa alla principale scartate: ${submitted.drop}`)
+      },
+      error => log($, `istruzioni di pausa alla principale rifiutate: ${errorText(error)}`),
+    )
+    return
+  }
+  const archived = await archiveCopy($, handoff)
   await $.fs.write(handoff.path, '')
   forgetAgent(agentId)
-  log($, `handoff ${handoff.id} del teammate ${short(agentId)} validato (pausa): fermato senza rilancio${stopNote}, si riprende da ${archived}`)
+  log($, `handoff ${handoff.id} del teammate ${short(agentId)} validato (pausa): fermato senza rilancio, si riprende da ${archived}`)
 }
 
 const roundsOf = (text: string) => Number(frontField(/^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '', 'rounds') ?? 0) || 0

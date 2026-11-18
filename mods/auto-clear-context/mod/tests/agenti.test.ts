@@ -655,6 +655,25 @@ test('TaskStop rifiutato: nessun rilancio, un prompt alla principale, un secondo
   expect(state.prompts.length).toBe(1)
 })
 
+test('pausa con TaskStop rifiutato: il file resta, un solo prompt al lead che chiede di fermarlo senza rilanciarlo', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  state.denied.set('TaskStop', 'permesso negato')
+  await validate($, state, ready('mode: pausa\n'))
+  await pause()
+  expect(restarted(state).length).toBe(0)
+  expect(state.files.get(FILE)).toContain('mode: pausa')
+  expect(state.prompts.length).toBe(1)
+  const text = String(state.prompts[0])
+  expect(text).toContain('permesso negato')
+  expect(text).toContain('s1--a1.md')
+  expect(text).toContain('non rilanciarlo')
+  await turnEnd($, 'a1')
+  await pause()
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.prompts.length).toBe(1)
+})
+
 test('spawn del rilancio rifiutato: un solo prompt alla principale, il file resta validated', async ($, on) => {
   const state = world(on, idleMate())
   await launched($, state)
