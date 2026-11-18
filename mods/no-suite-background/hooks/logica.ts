@@ -1,0 +1,264 @@
+// Logica pura della mod: lettura dei comandi, comandi pesanti, configurazione, processi.
+// Port dell'hook no-suite-background.py di pokefootleague (commit 32ecc99d, 48160b9a).
+
+export const PREDEFINITI = ['pytest', 'py.test', 'npm test', 'npm run test', 'vitest', 'cargo test', 'cargo build']
+const TIMEOUT_MASSIMO = 600000 // il massimo che il Bash accetta: oltre, l'agente non potrebbe obbedire
+
+export type Config = {
+  voci: string[][]
+  testi: string[]
+  nonContati: string[][]
+  timeoutMinimo: number
+  maxSullaMacchina: number
+  controlloProcessi: boolean
+}
+
+export type Processo = { pid: number; ppid: number; eta: number; cmd: string; albero?: string | null; cwd?: string | null }
+
+const PUNT = ';&|()'
+const SPAZI = ' \t\r\n'
+
+/** Token in stile shlex POSIX; con `punteggiatura` i separatori `; & | ( )` diventano token a sé.
+ * null se una virgoletta non si chiude o un backslash chiude il testo. */
+export function tokenizza(cmd: string, punteggiatura: boolean): string[] | null {
+  const out: string[] = []
+  let cur = ''
+  let aperto = false
+  const chiudi = () => {
+    if (aperto) out.push(cur)
+    cur = ''
+    aperto = false
+  }
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd.charAt(i)
+    if (SPAZI.includes(c)) {
+      chiudi()
+    } else if (punteggiatura && PUNT.includes(c)) {
+      chiudi()
+      let p = c
+      while (i + 1 < cmd.length && PUNT.includes(cmd.charAt(i + 1))) p += cmd.charAt(++i)
+      out.push(p)
+    } else if (c === "'") {
+      const fine = cmd.indexOf("'", i + 1)
+      if (fine < 0) return null
+      cur += cmd.slice(i + 1, fine)
+      aperto = true
+      i = fine
+    } else if (c === '"') {
+      aperto = true
+      let j = i + 1
+      for (; j < cmd.length && cmd.charAt(j) !== '"'; j++) {
+        if (cmd.charAt(j) === '\\' && (cmd.charAt(j + 1) === '"' || cmd.charAt(j + 1) === '\\')) j++
+        cur += cmd.charAt(j)
+      }
+      if (j >= cmd.length) return null
+      i = j
+    } else if (c === '\\') {
+      if (i + 1 >= cmd.length) return null
+      cur += cmd.charAt(++i)
+      aperto = true
+    } else {
+      cur += c
+      aperto = true
+    }
+  }
+  chiudi()
+  return out
+}
+
+/** I comandi semplici di `cmd`, ognuno come lista di token. Le virgolette tengono insieme un argomento
+ * (`pgrep -f "python -m pytest|suite.sh"` è un solo comando); se non si chiudono, split grezzo. */
+export function parti(cmd: string): string[][] {
+  const tok = tokenizza(cmd.replace(/\n/g, ' ; '), true)
+  if (tok === null) {
+    return cmd.split(/&&|\|\||[;|\n&()]/).map(p => p.split(/\s+/).filter(Boolean)).filter(p => p.length > 0)
+  }
+  const out: string[][] = []
+  let cur: string[] = []
+  for (const t of tok) {
+    if (t !== '' && [...t].every(c => PUNT.includes(c))) {
+      out.push(cur)
+      cur = []
+    } else cur.push(t)
+  }
+  out.push(cur)
+  return out.filter(p => p.length > 0)
+}
+
+const base = (t: string) => t.split('/').pop() ?? t
+const PREFISSI = new Set(['env', 'time', 'nice', 'nohup', 'exec', 'command', 'npx', 'bunx'])
+const RUNNER = new Set(['uv', 'poetry', 'pipenv', 'pdm'])
+const SHELL = new Set(['sh', 'bash', 'zsh', 'dash'])
+const SHELL_C = /^-[a-z]*c[a-z]*$/
+
+/** Toglie i prefissi che lanciano un altro comando: `VAR=x`, `env`, `npx`, `uv run`, `python -m X`, `node <script>`… */
+export function normalizza(tok: readonly string[]): string[] {
+  let t = [...tok]
+  for (let giri = 0; giri < 16 && t.length > 0; giri++) {
+    const t0 = t[0] ?? ''
+    const b = base(t0)
+    const arg = t[1] !== undefined && !t[1].startsWith('-')
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t0) || PREFISSI.has(b)) t = t.slice(1)
+    else if ((RUNNER.has(b) && t[1] === 'run') || ((b === 'pnpm' || b === 'yarn') && t[1] === 'exec')) t = t.slice(2)
+    else if (b.startsWith('python') && t[1] === '-m' && t[2] !== undefined) t = t.slice(2)
+    else if ((b.startsWith('python') || b === 'node' || SHELL.has(b)) && arg) t = t.slice(1)
+    else break
+  }
+  return t
+}
+
+const corrisponde = (t: readonly string[], voce: readonly string[]) =>
+  voce.length > 0 && t.length >= voce.length && base(t[0] ?? '') === base(voce[0] ?? '') && voce.slice(1).every((w, i) => t[i + 1] === w)
+
+const pesanteTok = (tok: readonly string[], voci: readonly string[][]) => {
+  const t = normalizza(tok)
+  return voci.some(v => corrisponde(t, v))
+}
+
+function contaParte(tok: readonly string[], cfg: Config, prof: number): number {
+  const t = normalizza(tok)
+  if (t.length > 2 && SHELL.has(base(t[0] ?? '')) && SHELL_C.test(t[1] ?? '') && prof < 4) return conta(t[2] ?? '', cfg, prof + 1)
+  return cfg.voci.some(v => corrisponde(t, v)) ? 1 : 0
+}
+
+function conta(cmd: string, cfg: Config, prof: number): number {
+  return parti(cmd).reduce((n, p) => n + contaParte(p, cfg, prof), 0)
+}
+
+export const quantiPesanti = (cmd: string, cfg: Config) => conta(cmd, cfg, 0)
+
+const voce = (s: string) => normalizza(tokenizza(s, false) ?? s.split(/\s+/).filter(Boolean))
+const stringhe = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : null)
+
+/** La configurazione del progetto dal testo di `.claude/no-suite-background.json`; null = mod spenta. */
+export function configurazione(testo: string | undefined): Config | null {
+  if (testo === undefined) return null
+  let d: unknown
+  try {
+    d = JSON.parse(testo)
+  } catch {
+    return null
+  }
+  if (d === null || typeof d !== 'object' || Array.isArray(d)) return null
+  const o = d as Record<string, unknown>
+  const testi = [...(stringhe(o.comandi) ?? PREDEFINITI), ...(stringhe(o.aggiungi) ?? [])]
+  const tm = typeof o.timeoutMinimo === 'number' && o.timeoutMinimo > 0 ? Math.min(o.timeoutMinimo, TIMEOUT_MASSIMO) : TIMEOUT_MASSIMO
+  const mx = typeof o.maxSullaMacchina === 'number' && o.maxSullaMacchina >= 0 ? Math.floor(o.maxSullaMacchina) : 3
+  return {
+    voci: testi.map(voce),
+    testi,
+    nonContati: (stringhe(o.nonContati) ?? []).map(voce),
+    timeoutMinimo: tm,
+    maxSullaMacchina: mx,
+    controlloProcessi: typeof o.controlloProcessi === 'boolean' ? o.controlloProcessi : true,
+  }
+}
+
+export type InputBash = { command?: unknown; run_in_background?: unknown; timeout?: unknown }
+
+/** Il motivo del rifiuto per un Bash, senza guardare i processi; undefined se passa. */
+export function decidi(input: InputBash, cfg: Config): string | undefined {
+  const cmd = typeof input.command === 'string' ? input.command : ''
+  const n = quantiPesanti(cmd, cfg)
+  if (n === 0) return undefined
+  const elenco = cfg.testi.join(', ')
+  const motivo = `lancialo in primo piano, timeout ${cfg.timeoutMinimo} (${elenco} non vanno in background)`
+  if (input.run_in_background === true) return motivo
+  if (n > 1) {
+    return `un solo comando pesante (${elenco}) per Bash: insieme possono superare i 10 minuti e l'harness li sposta ` +
+      `in background; lanciali in Bash separati, ognuno con timeout ${cfg.timeoutMinimo}`
+  }
+  const v = Number(input.timeout ?? 0)
+  const t = Number.isFinite(v) ? Math.trunc(v) : 0
+  if (t < cfg.timeoutMinimo) {
+    return `timeout ${t || 'assente'}: passa timeout ${cfg.timeoutMinimo} (col timeout predefinito di 120 s il comando ` +
+      `finisce in background e l'agente resta fermo); ${motivo}`
+  }
+  return undefined
+}
+
+export function etaSecondi(e: string): number {
+  const k = e.lastIndexOf('-')
+  const giorni = k >= 0 ? Number(e.slice(0, k)) : 0
+  const sec = e.slice(k + 1).split(':').reduce((s, x) => s * 60 + Number(x), 0)
+  return sec + giorni * 86400
+}
+
+export function etaLeggibile(s: number): string {
+  const due = (n: number) => String(n).padStart(2, '0')
+  if (s >= 3600) return `${Math.floor(s / 3600)}h${due(Math.floor((s % 3600) / 60))}m`
+  return `${Math.floor(s / 60)}m${due(s % 60)}s`
+}
+
+/** Un processo pesante vero (riga di `ps`), non una shell `-c` né un worker che lo cita nel testo. */
+export function principale(cmd: string, cfg: Config): boolean {
+  return pesanteTok(tokenizza(cmd, false) ?? cmd.split(/\s+/).filter(Boolean), cfg.voci)
+}
+
+/** Righe di `ps -axo pid=,ppid=,etime=,command=`: tutti i genitori e i processi pesanti. */
+export function leggiPs(out: string, cfg: Config): { genitori: Map<number, number>; pesanti: Processo[] } {
+  const genitori = new Map<number, number>()
+  const pesanti: Processo[] = []
+  for (const r of out.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(r)
+    if (!m) continue
+    const [, a = '', b = '', etime = '', cmd = ''] = m
+    const pid = Number(a)
+    const ppid = Number(b)
+    genitori.set(pid, ppid)
+    if (principale(cmd, cfg)) pesanti.push({ pid, ppid, eta: etaSecondi(etime), cmd })
+  }
+  return { genitori, pesanti }
+}
+
+/** La cartella in cui gira `cmd`: un `cd <dir> &&` o `cd <dir>;` in testa la sposta. */
+export function dirComando(cmd: string, cwd: string, home?: string): string {
+  const m = /^\s*cd\s+(\S+)\s*(?:&&|;)/.exec(cmd)
+  if (!m) return cwd
+  let d = (m[1] ?? '').replace(/^['"]|['"]$/g, '')
+  if (home && (d === '~' || d.startsWith('~/'))) d = home + d.slice(1)
+  return pulisci(d.startsWith('/') ? d : `${cwd.replace(/\/+$/, '')}/${d}`)
+}
+
+export function pulisci(p: string): string {
+  const out: string[] = []
+  for (const s of p.split('/')) {
+    if (s === '' || s === '.') continue
+    if (s === '..') out.pop()
+    else out.push(s)
+  }
+  return `/${out.join('/')}`
+}
+
+/** Il motivo del rifiuto se un comando pesante occupa già lo stesso albero, o il tetto sulla macchina è pieno.
+ * `procs` ha l'albero già risolto; si contano solo i processi radice (né worker né figli di un pesante). */
+export function occupanti(procs: readonly Processo[], mio: string | null, cfg: Config, genitori?: Map<number, number>): string | undefined {
+  const pesanti = procs.filter(p => principale(p.cmd, cfg))
+  const pids = new Set(pesanti.map(p => p.pid))
+  const haAntenatoPesante = (p: Processo) => {
+    let q = p.ppid
+    for (let giri = 0; giri < 64 && q > 1; giri++) {
+      if (pids.has(q)) return true
+      const g = genitori?.get(q)
+      if (g === undefined) return false
+      q = g
+    }
+    return false
+  }
+  const radici = pesanti.filter(p => !haAntenatoPesante(p))
+  const desc = (p: Processo, motivo: string) => {
+    const c = p.cmd.length <= 80 ? p.cmd : `${p.cmd.slice(0, 77)}...`
+    return `${motivo}: occupa il posto il PID ${p.pid} (in corso da ${etaLeggibile(Math.trunc(p.eta))}, ` +
+      `albero ${p.albero || 'sconosciuto'}, comando \`${c}\`). Aspetta che finisca o fermalo se è un tuo doppione.`
+  }
+  if (mio) {
+    const stesso = radici.find(p => p.albero === mio)
+    if (stesso) return desc(stesso, 'Nello stesso albero di lavoro gira già un comando pesante')
+  }
+  const contati = radici.filter(p => !pesanteTok(tokenizza(p.cmd, false) ?? p.cmd.split(/\s+/), cfg.nonContati))
+  if (cfg.maxSullaMacchina > 0 && contati.length >= cfg.maxSullaMacchina) {
+    const vecchio = contati.reduce((a, b) => (b.eta > a.eta ? b : a))
+    return desc(vecchio, `Sulla macchina girano già ${contati.length} comandi pesanti (massimo ${cfg.maxSullaMacchina})`)
+  }
+  return undefined
+}

@@ -16,6 +16,7 @@ Skill e mod per Claude Code, pubblicate come un unico marketplace di plugin.
 | [auto-clear-context](mods/auto-clear-context) | mod | Handoff validato e `/clear` automatico vicino alle soglie di contesto |
 | [prompt-builder](mods/prompt-builder) | mod | Trasforma i prompt lunghi in un brief con intervista e proposte approvate prima che arrivino alla sessione |
 | [agent-monitor](mods/agent-monitor) | mod | Pannello live degli agenti e delle sessioni di progetto: stato, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma/attach |
+| [no-suite-background](mods/no-suite-background) | mod | Suite e build solo in primo piano con timeout 600000, una per Bash; attiva nei progetti con `.claude/no-suite-background.json` |
 
 ## Struttura
 

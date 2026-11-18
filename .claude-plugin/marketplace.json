@@ -17,6 +17,11 @@
       "name": "agent-monitor",
       "source": "./mods/agent-monitor",
       "description": "Pannello live degli agenti e delle sessioni di progetto: stato, modello, token, durata e turni, con allarme di soglia e azioni Transcript/Ferma/attach."
+    },
+    {
+      "name": "no-suite-background",
+      "source": "./mods/no-suite-background",
+      "description": "Suite e build solo in primo piano con timeout 600000, una per Bash: niente agenti fermi ad aspettare una notifica che non arriva. Attiva per progetto."
     }
   ]
 }
