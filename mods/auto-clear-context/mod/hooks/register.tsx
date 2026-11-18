@@ -888,6 +888,7 @@ const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handof
       log($, `handoff ${handoff.id} validato, ma il teammate ${short(agentId)} è ${info.status}: rilancio al suo prossimo fine turno`)
       return
     }
+    if (handoff.mode === PAUSE_MODE) return await pauseAgent($, agentId, handoff)
     const input = await orElse(read($, { ...AGENT_INPUTS, id: agentId }), undefined)
     const name = input?.name ?? info.teammateId?.split('@')[0] ?? agentId
     // Ogni rilancio dà un id nuovo: il tetto e il dedupe contano per una chiave stabile (nome, teammateId, id).
@@ -944,6 +945,21 @@ const restartAgent = async ($: EngineInterface, agentId: string, handoff: Handof
   } finally {
     restarting.delete(agentId)
   }
+}
+
+// Handoff di pausa di un teammate: copia in archive/, TaskStop e file svuotato, ma nessun rilancio.
+const pauseAgent = async ($: EngineInterface, agentId: string, handoff: Handoff) => {
+  const archived = await archiveCopy($, handoff)
+  let stopNote = ''
+  try {
+    const refused = refusalOf(await $.tool.call({ tool: 'TaskStop', task_id: agentId }))
+    if (refused !== undefined) stopNote = ` (TaskStop non riuscito: ${refused})`
+  } catch (error) {
+    stopNote = ` (TaskStop non riuscito: ${errorText(error)})`
+  }
+  await $.fs.write(handoff.path, '')
+  forgetAgent(agentId)
+  log($, `handoff ${handoff.id} del teammate ${short(agentId)} validato (pausa): fermato senza rilancio${stopNote}, si riprende da ${archived}`)
 }
 
 const roundsOf = (text: string) => Number(frontField(/^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '', 'rounds') ?? 0) || 0
@@ -1319,7 +1335,9 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', ($, e, next) => {
-    attachFor = e.reason === 'clear' ? { owner: e.sessionId, source: 'clear' } : undefined
+    // Un handoff di pausa archiviato e non ancora allegato passa anche a un altro /clear prima del primo prompt.
+    const carried = e.reason === 'clear' ? attachFor?.ready : undefined
+    attachFor = e.reason === 'clear' ? { owner: e.sessionId, source: 'clear', ...(carried === undefined ? {} : { ready: carried }) } : undefined
     if (e.reason === 'clear' && isClearRequested && isPauseClear) {
       // Pausa: archivio subito (resta anche se il PC si spegne), nessuna ripresa; il primo prompt scritto lo allega.
       isClearRequested = false

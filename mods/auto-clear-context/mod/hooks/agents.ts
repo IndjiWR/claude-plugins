@@ -114,6 +114,7 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, 
         : `Scrivi l'handoff in ${path} con il modello qui sotto, tutte le sezioni obbligatorie, con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`,
       `Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con la sola riga «HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo».`,
       'La mod ferma questo teammate e lo rilancia con lo stesso nome, tipo e modello, dandogli l\'handoff come prompt.',
+      'Se invece il lavoro va fermato (chiusura, spegnimento del PC, stop chiesto dal lead o dall\'utente), aggiungi mode: pausa nel frontmatter: la mod valida l\'handoff, lo archivia e ferma il teammate senza rilanciarlo.',
     ].join(' ') + withModel(model)
   }
   return [

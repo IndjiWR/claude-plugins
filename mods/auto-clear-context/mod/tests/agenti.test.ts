@@ -179,6 +179,7 @@ test('teammate: la nota chiede status ready e non lancia il validatore', async (
   expect(note).toContain('s1--a1.md')
   expect(note).toContain('status: ready')
   expect(note).toContain('Non lanciare il validatore')
+  expect(note).toContain('mode: pausa')
 })
 
 const skillSrc = ['## Formato', '', 'Ogni sezione è obbligatoria.', '', '```markdown', '---', 'status: draft', 'session: x', '---', '## Prossimo passo immediato', '<una sola azione>', '```'].join('\n')
@@ -485,6 +486,24 @@ test('handoff validato, teammate idle: TaskStop, poi rilancio con l input origin
   expect(state.files.get(copy ?? '')).toContain('status: validated')
   expect(call?.prompt).toContain(copy ?? 'nessuna copia')
   expect(state.prompts.length).toBe(0)
+})
+
+test('handoff di pausa validato, teammate idle: TaskStop e copia in archive, nessun rilancio né prompt al lead', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  await validate($, state, ready('mode: pausa\n'))
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.toolCalls[0]).toMatchObject({ task_id: 'a1' })
+  expect(restarted(state).length).toBe(0)
+  expect(state.files.get(FILE)).toBe('')
+  const [copy, ...rest] = archived(state)
+  expect(rest.length).toBe(0)
+  expect(state.files.get(copy ?? '')).toContain('mode: pausa')
+  await pause()
+  expect(state.prompts.length).toBe(0)
+  // Un altro fine turno non rilancia: il file è vuoto.
+  await turnEnd($, 'a1')
+  expect(restarted(state).length).toBe(0)
 })
 
 test('senza input registrato: spawn con name, tipo e description della lista', async ($, on) => {
