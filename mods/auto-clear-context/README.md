@@ -43,6 +43,8 @@ auto-clear-context: handoff 9b1c4e2a1f3c della sessione 3f2a8c1d allegato alla s
 
 In order: the soft zone is reached at 41% and the note goes out with the next prompt; the handoff is validated and the mod runs `/clear`; the resume prompt is sent; the handoff is attached to the new session and archived.
 
+**Pause handoffs.** A handoff written to stop, not to continue (PC shutdown, end of the day, a stop asked by the user) carries `mode: pausa` in its frontmatter. Since 0.11.0 the mod still validates it, runs `/clear` and archives it right away in `archive/`, but sends no resume prompt: the work stays stopped. If the session stays open, the user's first prompt gets the handoff attached.
+
 In the project the mod uses `.claude/handoff/`: `pending/` (one handoff per session), `archive/` and `events.log`.
 
 ### Subagents and teammates
@@ -222,6 +224,8 @@ Nelle zone morbida e dura mai a metà di un edit o di un debug; in nessuna zona 
 Dopo l'handoff validato, a fine turno la mod esegue `/clear`, allega l'handoff alla sessione nuova e fa ripartire il turno dal "prossimo passo".
 
 **Più sessioni nella stessa cartella.** Ognuna scrive il suo handoff in `.claude/handoff/pending/<id della sessione>.md`, con `session: <id della sessione>` nel frontmatter. La skill prende l'id da `${CLAUDE_SESSION_ID}` e la nota di zona riporta lo stesso percorso. A fine turno la mod guarda solo l'handoff della sessione, quindi una sessione non fa mai `/clear` per l'handoff validato di un'altra; dopo il `/clear` allega solo l'handoff della sessione che il clear ha chiuso.
+
+**Handoff di pausa.** Un handoff scritto per fermarsi e non per continuare (spegnimento del PC, chiusura notturna, stop chiesto dall'utente) porta `mode: pausa` nel frontmatter. Dalla 0.11.0 la mod lo valida, esegue `/clear` e lo archivia subito in `archive/`, ma non invia il prompt di ripresa: il lavoro resta fermo. Se la sessione resta aperta, il primo prompt dell'utente riceve l'handoff allegato.
 
 Se la sessione si chiude prima del clear (per esempio mentre il limite orario lo trattiene), l'handoff validato resta nel suo file e nessun'altra sessione lo prende. Finché quella sessione è aperta, un `/clear` a mano lì allega l'handoff al primo prompt (senza il prompt di ripresa); altrimenti chiedi a Claude di leggere quel file. Una bozza rimasta lì si riprende solo a mano.
 
