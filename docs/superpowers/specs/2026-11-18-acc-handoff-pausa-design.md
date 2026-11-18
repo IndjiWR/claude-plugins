@@ -19,3 +19,12 @@ fatto /clear e ha inviato il prompt di ripresa; la sessione ha ripreso review e 
    allegato al primo prompt scritto; il test esistente sull'handoff normale resta (ripresa sì).
 2. `register.tsx`: campo `mode` in `Handoff`, `clearMode` fissato in `tryClear`, ramo pausa in `session.end`.
 3. Skill, README (EN e IT), versione 0.11.0. Suite completa, validate/test del plugin, review, merge.
+
+## Seguito (0.12.0): teammate e doppio /clear
+- Teammate: un handoff `agent:` validato con `mode: pausa` non porta al rilancio. Quando il teammate è fermo, la mod
+  fa la copia in `archive/`, `TaskStop`, svuota il file e lo toglie dal monitor; nessun prompt al lead.
+  La nota di zona ai teammate spiega quando usare `mode: pausa`.
+- Doppio /clear: l'handoff di pausa archiviato e non ancora allegato passa anche a un /clear successivo, fino al primo
+  prompt scritto.
+- TDD: test rossi in `tests/agenti.test.ts` (pausa: TaskStop, nessun rilancio; la nota cita `mode: pausa`) e in
+  `tests/fase1.test.ts` (doppio /clear); il test del rilancio normale resta.

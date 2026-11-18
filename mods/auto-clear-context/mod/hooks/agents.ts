@@ -114,6 +114,7 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, 
         : `Scrivi l'handoff in ${path} con il modello qui sotto, tutte le sezioni obbligatorie, con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`,
       `Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con la sola riga «HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo».`,
       'La mod ferma questo teammate e lo rilancia con lo stesso nome, tipo e modello, dandogli l\'handoff come prompt.',
+      'Se invece il lavoro va fermato (chiusura, spegnimento del PC, stop chiesto dal lead o dall\'utente), aggiungi mode: pausa nel frontmatter: la mod valida l\'handoff, lo archivia e ferma il teammate senza rilanciarlo.',
     ].join(' ') + withModel(model)
   }
   return [
@@ -177,6 +178,9 @@ export const leadFallback = (name: string, path: string, reason: string) =>
     `La mod auto-clear-context non è riuscita a rilanciare da sola il teammate «${name}» (${reason}); il suo handoff è validato in ${path}.`,
     `Fai così: 1) TaskStop sul teammate ${name}; 2) Agent con lo stesso name «${name}» nello stesso team, lo stesso tipo e lo stesso modello, e prompt «Riprendi dall'handoff ${path}».`,
   ].join(' ')
+
+export const leadPauseFallback = (name: string, path: string, reason: string) =>
+  `La mod auto-clear-context non è riuscita a fermare il teammate «${name}» (${reason}): il suo handoff di pausa è validato in ${path}. Fai TaskStop sul teammate ${name} e non rilanciarlo: si riprende più tardi da quel file.`
 
 // Un agente dato attivo ma senza eventi da `minutes` minuti è stantio. 0 spegne la scadenza.
 export const isStale = (lastSeen: number, now: number, minutes: number): boolean =>

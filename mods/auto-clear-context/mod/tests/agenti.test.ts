@@ -179,6 +179,7 @@ test('teammate: la nota chiede status ready e non lancia il validatore', async (
   expect(note).toContain('s1--a1.md')
   expect(note).toContain('status: ready')
   expect(note).toContain('Non lanciare il validatore')
+  expect(note).toContain('mode: pausa')
 })
 
 const skillSrc = ['## Formato', '', 'Ogni sezione è obbligatoria.', '', '```markdown', '---', 'status: draft', 'session: x', '---', '## Prossimo passo immediato', '<una sola azione>', '```'].join('\n')
@@ -487,6 +488,24 @@ test('handoff validato, teammate idle: TaskStop, poi rilancio con l input origin
   expect(state.prompts.length).toBe(0)
 })
 
+test('handoff di pausa validato, teammate idle: TaskStop e copia in archive, nessun rilancio né prompt al lead', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  await validate($, state, ready('mode: pausa\n'))
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.toolCalls[0]).toMatchObject({ task_id: 'a1' })
+  expect(restarted(state).length).toBe(0)
+  expect(state.files.get(FILE)).toBe('')
+  const [copy, ...rest] = archived(state)
+  expect(rest.length).toBe(0)
+  expect(state.files.get(copy ?? '')).toContain('mode: pausa')
+  await pause()
+  expect(state.prompts.length).toBe(0)
+  // Un altro fine turno non rilancia: il file è vuoto.
+  await turnEnd($, 'a1')
+  expect(restarted(state).length).toBe(0)
+})
+
 test('senza input registrato: spawn con name, tipo e description della lista', async ($, on) => {
   const state = world(on, idleMate())
   await validate($, state)
@@ -630,6 +649,25 @@ test('TaskStop rifiutato: nessun rilancio, un prompt alla principale, un secondo
   expect(state.prompts[0]).toContain('permesso negato')
   expect(state.prompts[0]).toContain('s1--a1.md')
   expect(state.files.get(FILE)).toContain('status: validated')
+  await turnEnd($, 'a1')
+  await pause()
+  expect(toolsCalled(state)).toEqual(['TaskStop'])
+  expect(state.prompts.length).toBe(1)
+})
+
+test('pausa con TaskStop rifiutato: il file resta, un solo prompt al lead che chiede di fermarlo senza rilanciarlo', async ($, on) => {
+  const state = world(on, idleMate())
+  await launched($, state)
+  state.denied.set('TaskStop', 'permesso negato')
+  await validate($, state, ready('mode: pausa\n'))
+  await pause()
+  expect(restarted(state).length).toBe(0)
+  expect(state.files.get(FILE)).toContain('mode: pausa')
+  expect(state.prompts.length).toBe(1)
+  const text = String(state.prompts[0])
+  expect(text).toContain('permesso negato')
+  expect(text).toContain('s1--a1.md')
+  expect(text).toContain('non rilanciarlo')
   await turnEnd($, 'a1')
   await pause()
   expect(toolsCalled(state)).toEqual(['TaskStop'])

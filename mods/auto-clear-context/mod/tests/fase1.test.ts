@@ -142,6 +142,24 @@ test('handoff di pausa validato: /clear e archivio, nessun prompt di ripresa; al
   expect(state.commands.length).toBe(1)
 })
 
+test('handoff di pausa: un secondo /clear prima del primo prompt non perde l allegato', async ($, on) => {
+  const state = world(on)
+  state.files.set(PENDING, VALIDATED.replace('rounds: 1', 'rounds: 1\nmode: pausa'))
+
+  await $.turn.complete(turnEnd('t1'))
+  await settle($, () => state.commands.length > 0)
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  state.session = 's2'
+  await settle($, () => state.files.get(PENDING) === '')
+  // /clear a mano nella sessione pulita, prima di scrivere.
+  await $.session.end({ reason: 'clear', sessionId: 's2', resume: { id: 's2' } })
+  state.session = 's3'
+
+  const first = await $.prompt.submit(typed('riprendi'))
+  expect((first.context ?? []).join('\n').includes('Rileggere src/app.ts')).toBe(true)
+  expect(state.prompts.filter(prompt => prompt.origin.kind === 'plugin').length).toBe(0)
+})
+
 test('un handoff in bozza non provoca nessun clear', async ($, on) => {
   const state = world(on)
   state.files.set(PENDING, VALIDATED.replace('status: validated', 'status: draft'))
