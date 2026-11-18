@@ -33,8 +33,18 @@ import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, Thres
 // Dove /config non ha le righe (sessioni headless, tab Code dell'app) le salva la
 // mod in $.store. Il monitor legge le soglie in vigore a ogni controllo.
 
-// `session` e `agent` sono i campi del frontmatter, se ci sono; `path` il file da cui viene.
-type Handoff = { text: string; status: string; session: string | undefined; agent: string | undefined; id: string; path: string }
+// `session`, `agent` e `mode` sono i campi del frontmatter, se ci sono; `path` il file da cui viene.
+// `mode: pausa`: handoff di chiusura (spegnimento, stop chiesto): /clear e archivio, ma nessun prompt di ripresa.
+type Handoff = {
+  text: string
+  status: string
+  session: string | undefined
+  agent: string | undefined
+  mode: string | undefined
+  id: string
+  path: string
+}
+const PAUSE_MODE = 'pausa'
 type ClearRecord = { at: number; handoff: string }
 // `agent` è la chiave stabile del teammate (nome, teammateId o id), non l'id: cambia a ogni rilancio.
 type RestartRecord = { at: number; agent: string; handoff: string }
@@ -169,6 +179,8 @@ const PENDING_WRITE = { plugin: 'auto-clear-context', key: 'pendingWrite' } as c
 let pendingNote: { session: string; zone: ThresholdZone; text: string } | undefined
 let lastCheckAt = 0
 let isClearRequested = false
+// Il clear chiesto è per un handoff di pausa: session.end non invia la ripresa.
+let isPauseClear = false
 // Clear della principale con agenti attivi: `isMainBusy` è vero finché la principale è in un turno;
 // `isTryingClear` evita che due controlli ravvicinati (principale e agenti) lancino due /clear.
 let isMainBusy = false
@@ -210,7 +222,8 @@ const VALIDATOR_MODEL = 'sonnet'
 const AGENT_INPUTS = { plugin: 'auto-clear-context', key: 'agentInputs' } as const
 // Dopo un /clear (la sessione che ha chiuso, perché la nuova ha già un altro id) o un
 // compact (la sessione stessa): di chi è l'handoff che il prossimo prompt allega.
-type AttachFor = { owner: string; source: 'clear' | 'compact' }
+// `ready`: l'handoff già archiviato al /clear di una pausa, da allegare al primo prompt scritto.
+type AttachFor = { owner: string; source: 'clear' | 'compact' | 'pausa'; ready?: Promise<string | undefined> }
 let attachFor: AttachFor | undefined
 // Gli handoff che non sono della sessione già segnalati nel log, per impronta.
 const reported = new Set<string>()
@@ -295,7 +308,15 @@ const readHandoff = async ($: EngineInterface, path: string): Promise<Handoff | 
   if (text.trim() === '') return undefined
   const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? ''
   const status = frontField(front, 'status') ?? 'draft'
-  return { text, status, session: frontField(front, 'session'), agent: frontField(front, 'agent'), id: fingerprint(text), path }
+  return {
+    text,
+    status,
+    session: frontField(front, 'session'),
+    agent: frontField(front, 'agent'),
+    mode: frontField(front, 'mode'),
+    id: fingerprint(text),
+    path,
+  }
 }
 
 // L'handoff di una sessione: il suo file in pending/ (se il frontmatter non
@@ -344,7 +365,11 @@ const attachedHandoff = async ($: EngineInterface, attach: AttachFor): Promise<s
     const handoff = await readOwnHandoff($, attach.owner)
     if (handoff?.status !== 'validated') return undefined
     const archived = await archive($, handoff)
-    log($, `handoff ${handoff.id} della sessione ${short(attach.owner)} allegato alla sessione (${attach.source}) e archiviato in ${archived}`)
+    const done =
+      attach.source === 'pausa'
+        ? `archiviato in ${archived} per la ripresa (pausa): si allega al primo prompt scritto, se la sessione resta aperta`
+        : `allegato alla sessione (${attach.source}) e archiviato in ${archived}`
+    log($, `handoff ${handoff.id} della sessione ${short(attach.owner)} ${done}`)
     return attached(handoff, archived)
   } catch (error) {
     log($, `handoff della sessione ${short(attach.owner)} non allegato: ${errorText(error)}`)
@@ -1135,6 +1160,7 @@ const tryClear = async ($: EngineInterface, reason: string, ending?: string) => 
     // La principale può essere ripartita durante gli await: il /clear spazzerebbe il suo prompt.
     if (isMainBusy) return
     isClearRequested = true
+    isPauseClear = handoff.mode === PAUSE_MODE
     resetDeferral()
     try {
       await $.store.set(CLEARS_KEY, [...clears, { at: now, handoff: handoff.id }].slice(-CLEARS_KEPT))
@@ -1142,7 +1168,8 @@ const tryClear = async ($: EngineInterface, reason: string, ending?: string) => 
       isClearRequested = false
       throw error
     }
-    log($, `handoff ${handoff.id} della sessione ${short(session)} validato: eseguo /clear (${reason})`)
+    const kind = isPauseClear ? 'validato (pausa)' : 'validato'
+    log($, `handoff ${handoff.id} della sessione ${short(session)} ${kind}: eseguo /clear (${reason})`)
     runClear($, true)
   } finally {
     isTryingClear = false
@@ -1239,7 +1266,7 @@ export const register: Register = (on, options) => {
     const attach = attachFor
     if (attach !== undefined && e.command === undefined) {
       attachFor = undefined
-      const text = await attachedHandoff($, attach)
+      const text = await (attach.ready ?? attachedHandoff($, attach))
       if (text !== undefined) context.push(text)
     }
     const note = pendingNote
@@ -1293,7 +1320,15 @@ export const register: Register = (on, options) => {
 
   on('session.end', ($, e, next) => {
     attachFor = e.reason === 'clear' ? { owner: e.sessionId, source: 'clear' } : undefined
-    if (e.reason === 'clear' && isClearRequested) {
+    if (e.reason === 'clear' && isClearRequested && isPauseClear) {
+      // Pausa: archivio subito (resta anche se il PC si spegne), nessuna ripresa; il primo prompt scritto lo allega.
+      isClearRequested = false
+      isPauseClear = false
+      pendingNote = undefined
+      resetDeferral()
+      log($, 'clear eseguito per un handoff di pausa: nessun prompt di ripresa, il lavoro resta fermo')
+      attachFor = { owner: e.sessionId, source: 'clear', ready: attachedHandoff($, { owner: e.sessionId, source: 'pausa' }) }
+    } else if (e.reason === 'clear' && isClearRequested) {
       isClearRequested = false
       pendingNote = undefined
       resetDeferral()

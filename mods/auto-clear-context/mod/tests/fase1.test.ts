@@ -115,6 +115,33 @@ test('handoff validato: un solo /clear, ripresa automatica, handoff allegato e a
   expect(state.commands.length).toBe(1)
 })
 
+test('handoff di pausa validato: /clear e archivio, nessun prompt di ripresa; allegato al primo prompt scritto', async ($, on) => {
+  const state = world(on)
+  state.files.set(PENDING, VALIDATED.replace('rounds: 1', 'rounds: 1\nmode: pausa'))
+
+  await $.turn.complete(turnEnd('t1'))
+  await settle($, () => state.commands.length > 0)
+  expect(state.commands).toEqual(['clear'])
+
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  state.session = 's2'
+  const resumes = () => state.prompts.filter(prompt => prompt.origin.kind === 'plugin')
+  const archived = () => [...state.files.keys()].some(path => path.includes('/.claude/handoff/archive/'))
+  await settle($, () => archived())
+  await settle($, () => resumes().length > 0)
+  expect(resumes().length).toBe(0)
+  // Archiviato subito, senza aspettare un prompt: resta anche se il PC si spegne.
+  expect(state.files.get(PENDING)).toBe('')
+  expect(archived()).toBe(true)
+
+  // La sessione resta aperta: il primo prompt dell'utente riceve l'handoff.
+  const first = await $.prompt.submit(typed('riprendi'))
+  expect((first.context ?? []).join('\n').includes('Rileggere src/app.ts')).toBe(true)
+  const second = await $.prompt.submit(typed('ancora'))
+  expect((second.context ?? []).join('\n').includes('Rileggere src/app.ts')).toBe(false)
+  expect(state.commands.length).toBe(1)
+})
+
 test('un handoff in bozza non provoca nessun clear', async ($, on) => {
   const state = world(on)
   state.files.set(PENDING, VALIDATED.replace('status: validated', 'status: draft'))

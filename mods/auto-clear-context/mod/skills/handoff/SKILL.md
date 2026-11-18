@@ -20,8 +20,8 @@ description: Salva lo stato del lavoro in .claude/handoff/pending/<id della sess
    - Solo se il percorso qui sopra non contiene un id di sessione, usa quello dell'ultima nota di zona della mod e metti in `session` l'id che compare nel nome di quel file.
    - Se il progetto è un repo git, `.claude/handoff/` deve stare in `.git/info/exclude`; aggiungilo se manca. Niente commit né push di questi file.
 4. **Fallo validare** dall'agent `auto-clear-context:handoff-validator`, in foreground, con `model: sonnet` (l'effort low è nella sua definizione), passandogli **solo** il percorso assoluto del file. Confronta la sua ricostruzione con lo stato reale, correggi le lacune e rilancia. Al massimo 2 giri.
-5. **Segna l'handoff come validato** nel frontmatter: `status: validated`, `validated_at` (ISO 8601) e `rounds`; `session` resta com'è.
-6. **Chiudi il turno con una sola riga** che nomina il file dell'handoff, senza altre azioni. A fine turno la mod esegue /clear, allega l'handoff alla sessione pulita e fa ripartire il lavoro; se il /clear non arriva, la riga dice da quale file riprendere a mano.
+5. **Segna l'handoff come validato** nel frontmatter: `status: validated`, `validated_at` (ISO 8601) e `rounds`; `session` resta com'è. Se è un handoff di **pausa** (spegnimento del PC, chiusura notturna, stop chiesto dall'utente) aggiungi `mode: pausa`: la mod esegue /clear e archivia l'handoff, ma non fa ripartire il lavoro.
+6. **Chiudi il turno con una sola riga** che nomina il file dell'handoff, senza altre azioni. A fine turno la mod esegue /clear, allega l'handoff alla sessione pulita e fa ripartire il lavoro (con `mode: pausa` resta fermo: l'handoff va in `.claude/handoff/archive/` e si allega al primo prompt dell'utente); se il /clear non arriva, la riga dice da quale file riprendere a mano.
 
 ## Formato
 
@@ -36,6 +36,7 @@ validated_at:
 rounds: 0
 branch: <branch git, o "nessun repo">
 head: <sha corto di HEAD>
+mode: <solo per una pausa: "pausa"; altrimenti togli la riga>
 ---
 # Handoff: <titolo del lavoro>
 
