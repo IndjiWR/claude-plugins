@@ -31,8 +31,14 @@ export function tokenizza(cmd: string, punteggiatura: boolean): string[] | null 
   }
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd.charAt(i)
-    if (SPAZI.includes(c)) {
+    if (punteggiatura && c === '\n') {
       chiudi()
+      out.push(';')
+    } else if (SPAZI.includes(c)) {
+      chiudi()
+    } else if (c === '#' && !aperto) {
+      // commento fino all'a capo (un apostrofo dentro non apre una virgoletta)
+      while (i + 1 < cmd.length && cmd.charAt(i + 1) !== '\n') i++
     } else if (punteggiatura && PUNT.includes(c)) {
       chiudi()
       let p = c
@@ -69,7 +75,7 @@ export function tokenizza(cmd: string, punteggiatura: boolean): string[] | null 
 /** I comandi semplici di `cmd`, ognuno come lista di token. Le virgolette tengono insieme un argomento
  * (`pgrep -f "python -m pytest|suite.sh"` è un solo comando); se non si chiudono, split grezzo. */
 export function parti(cmd: string): string[][] {
-  const tok = tokenizza(cmd.replace(/\n/g, ' ; '), true)
+  const tok = tokenizza(cmd, true)
   if (tok === null) {
     return cmd.split(/&&|\|\||[;|\n&()]/).map(p => p.split(/\s+/).filter(Boolean)).filter(p => p.length > 0)
   }
@@ -86,25 +92,59 @@ export function parti(cmd: string): string[][] {
 }
 
 const base = (t: string) => t.split('/').pop() ?? t
-const PREFISSI = new Set(['env', 'time', 'nice', 'nohup', 'exec', 'command', 'npx', 'bunx'])
+const PREFISSI = new Set(['env', 'time', 'nice', 'nohup', 'exec', 'command', 'npx', 'bunx', 'sudo', 'xargs', 'timeout'])
+const PAROLE = new Set(['!', '{', 'do', 'then', 'else', 'elif', 'if', 'while', 'until'])
 const RUNNER = new Set(['uv', 'poetry', 'pipenv', 'pdm'])
 const SHELL = new Set(['sh', 'bash', 'zsh', 'dash'])
 const SHELL_C = /^-[a-z]*c[a-z]*$/
+// Opzioni che prendono un argomento separato, per programma.
+const CON_ARG: Record<string, readonly string[]> = {
+  nice: ['-n'], sudo: ['-u', '-g', '-C'], xargs: ['-n', '-I', '-L', '-P', '-d', '-E', '-s'], timeout: ['-s', '-k'],
+  env: ['-u', '-C', '-S'], python: ['-W', '-X'],
+}
+const opzione = (t: string | undefined) => t !== undefined && t.startsWith('-') && t !== '-'
 
-/** Toglie i prefissi che lanciano un altro comando: `VAR=x`, `env`, `npx`, `uv run`, `python -m X`, `node <script>`… */
+/** Salta le opzioni da `i` in poi; ritorna l'indice del primo token che non è un'opzione. */
+function salta(t: readonly string[], i: number, prog: string): number {
+  const conArg = CON_ARG[prog] ?? []
+  while (opzione(t[i])) i += conArg.includes(t[i] ?? '') ? 2 : 1
+  return i
+}
+
+/** Toglie i prefissi che lanciano un altro comando: `VAR=x`, `env`, `sudo`, `timeout 900`, `npx`, `uv run`,
+ * `python [-u] -m X`, `bash [-x] script`, `node script`, parole chiave della shell (`do`, `then`, `!`…). */
 export function normalizza(tok: readonly string[]): string[] {
   let t = [...tok]
   for (let giri = 0; giri < 16 && t.length > 0; giri++) {
     const t0 = t[0] ?? ''
     const b = base(t0)
-    const arg = t[1] !== undefined && !t[1].startsWith('-')
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t0) || PREFISSI.has(b)) t = t.slice(1)
-    else if ((RUNNER.has(b) && t[1] === 'run') || ((b === 'pnpm' || b === 'yarn') && t[1] === 'exec')) t = t.slice(2)
-    else if (b.startsWith('python') && t[1] === '-m' && t[2] !== undefined) t = t.slice(2)
-    else if ((b.startsWith('python') || b === 'node' || SHELL.has(b)) && arg) t = t.slice(1)
-    else break
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t0) || PAROLE.has(t0)) t = t.slice(1)
+    else if (PREFISSI.has(b)) {
+      if (b === 'command' && /^-[vV]/.test(t[1] ?? '')) break // `command -v pytest` cerca, non lancia
+      const i = salta(t, 1, b)
+      t = t.slice(b === 'timeout' ? i + 1 : i)
+    } else if ((RUNNER.has(b) && t[1] === 'run') || ((b === 'pnpm' || b === 'yarn') && t[1] === 'exec')) t = t.slice(salta(t, 2, b))
+    else if (b.startsWith('python')) {
+      let i = 1
+      while (opzione(t[i]) && t[i] !== '-m' && !(t[i] ?? '').startsWith('-c')) i += CON_ARG.python?.includes(t[i] ?? '') ? 2 : 1
+      if (t[i] === '-m' && t[i + 1] !== undefined) t = t.slice(i + 1)
+      else if (t[i] !== undefined && !opzione(t[i])) t = t.slice(i)
+      else break
+    } else if (SHELL.has(b) || b === 'node') {
+      let i = 1
+      while (opzione(t[i]) && !(SHELL.has(b) && SHELL_C.test(t[i] ?? ''))) i++
+      if (t[i] !== undefined && !opzione(t[i])) t = t.slice(i)
+      else break
+    } else break
   }
   return t
+}
+
+/** In `bash [opzioni] -c "…"` la stringa del comando, se c'è. */
+function stringaShell(t: readonly string[]): string | undefined {
+  if (!SHELL.has(base(t[0] ?? ''))) return undefined
+  for (let i = 1; opzione(t[i]); i++) if (SHELL_C.test(t[i] ?? '')) return t[i + 1]
+  return undefined
 }
 
 const corrisponde = (t: readonly string[], voce: readonly string[]) =>
@@ -117,7 +157,8 @@ const pesanteTok = (tok: readonly string[], voci: readonly string[][]) => {
 
 function contaParte(tok: readonly string[], cfg: Config, prof: number): number {
   const t = normalizza(tok)
-  if (t.length > 2 && SHELL.has(base(t[0] ?? '')) && SHELL_C.test(t[1] ?? '') && prof < 4) return conta(t[2] ?? '', cfg, prof + 1)
+  const interno = stringaShell(t)
+  if (interno !== undefined && prof < 4) return conta(interno, cfg, prof + 1)
   return cfg.voci.some(v => corrisponde(t, v)) ? 1 : 0
 }
 
@@ -163,7 +204,7 @@ export function decidi(input: InputBash, cfg: Config): string | undefined {
   if (n === 0) return undefined
   const elenco = cfg.testi.join(', ')
   const motivo = `lancialo in primo piano, timeout ${cfg.timeoutMinimo} (${elenco} non vanno in background)`
-  if (input.run_in_background === true) return motivo
+  if (input.run_in_background === true || input.run_in_background === 'true') return motivo
   if (n > 1) {
     return `un solo comando pesante (${elenco}) per Bash: insieme possono superare i 10 minuti e l'harness li sposta ` +
       `in background; lanciali in Bash separati, ognuno con timeout ${cfg.timeoutMinimo}`

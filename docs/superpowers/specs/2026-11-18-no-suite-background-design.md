@@ -34,6 +34,9 @@ token, poi parole esatte). Le voci dell'elenco passano dalla stessa normalizzazi
   = `["pytest","py.test","tools/suite.sh","python -m footmon.render.gallery"]`, `nonContati` = la galleria).
 - Un percorso col nome di un comando pesante in posizione d'argomento (`cat .venv/bin/pytest`) non è più pesante.
 - Motivi generici (nominano i comandi configurati).
+- Riconosce anche `bash -c "…"` (letto dentro), opzioni tra interprete e comando (`python -u -m pytest`,
+  `bash -x script`), wrapper con argomenti (`timeout 900`, `sudo`, `xargs`, `nice -n 10`), parole chiave della shell
+  (`do`, `then`, `!`, `{`) e salta i commenti `#` (un apostrofo dentro non apre una virgoletta).
 
 ## Piano (TDD)
 1. Test puri (`tests/logica.test.ts`): tokenizzazione, comandi pesanti, conteggio, processi, età — tutti i casi di

@@ -153,3 +153,26 @@ test('occupanti: nonContati fuori dal tetto ma non dallo stesso albero; tetto 0 
   const zero = configurazione(JSON.stringify({ maxSullaMacchina: 0 }))!
   expect(occupanti(P3, '/w/b', zero)).toBe(undefined)
 })
+
+test('review: flag tra interprete e comando, wrapper con argomenti, parole chiave', () => {
+  const n = (cmd: string) => quantiPesanti(cmd, POKE)
+  expect(['python -u -m pytest', 'python -W ignore -m pytest', 'python3 -X dev -m pytest', 'bash -x tools/suite.sh',
+    'timeout 900 pytest', 'sudo pytest', 'xargs -n1 pytest', 'env -i pytest', 'nice -n 10 pytest', 'time -p pytest',
+    'for d in a b; do pytest $d; done', 'if true; then pytest; fi', '! pytest', '{ pytest; }'].map(n))
+    .toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+  expect(['python -c "import pytest"', 'pip install pytest', 'which pytest', 'command -v pytest', 'python -W ignore x.py'].map(n))
+    .toEqual([0, 0, 0, 0, 0])
+  expect(principale('zsh -c python -m pytest tests', POKE)).toBe(false)
+  expect(principale('/usr/bin/python3 -u -m pytest -q', POKE)).toBe(true)
+})
+
+test('review: commenti # con apostrofi non inghiottono i comandi', () => {
+  expect(quantiPesanti("# l'agente\npytest -q\n# l'altro", POKE)).toBe(1)
+  expect(quantiPesanti('echo a#b; pytest', POKE)).toBe(1)
+  expect(quantiPesanti('ls # pytest', POKE)).toBe(0)
+})
+
+test('review: command non stringa e run_in_background truthy', () => {
+  expect(decidi({ command: 3 }, POKE)).toBe(undefined)
+  expect(decidi({ command: 'pytest', run_in_background: 'true', timeout: 600000 }, POKE)).toContain('primo piano')
+})

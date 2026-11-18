@@ -69,7 +69,7 @@ export const register: Register = on => {
     if (cfg === null) return next(e)
     const motivo = decidi(e, cfg)
     if (motivo) return { deny: `${$.plugin.name}: ${motivo}` }
-    if (cfg.controlloProcessi && quantiPesanti(e.command, cfg) > 0) {
+    if (cfg.controlloProcessi && typeof e.command === 'string' && quantiPesanti(e.command, cfg) > 0) {
       let msg: string | undefined
       try {
         const { genitori, procs } = await processi($, cfg)

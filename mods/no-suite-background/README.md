@@ -52,7 +52,12 @@ Esempio (pokefootleague):
 }
 ```
 
-Un JSON non valido lascia la mod spenta, con un avviso nel log di debug.
+Le voci passano dalla stessa lettura dei comandi: `uv run pytest` e `pytest` sono la stessa voce. Il confronto è
+per parole esatte: `cargo test` non copre `cargo +nightly test` né `npm run test:unit`, che vanno aggiunti a parte.
+
+Un JSON non valido lascia la mod spenta, con un avviso nel log di debug. Un campo col tipo sbagliato (`"comandi":
+"pytest"` al posto di un array, `"timeoutMinimo": "300000"` come stringa) è ignorato e vale il default;
+`"comandi": []` lascia la mod accesa ma senza comandi pesanti, quindi non rifiuta niente.
 
 ## Installazione
 
