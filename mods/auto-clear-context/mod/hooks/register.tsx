@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage, Timer } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, capByTokens, formatK, appendGaps, handoffModel, isStale, leadFallback, leadPauseFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, capByTokens, deliveredLeadNote, formatK, appendGaps, handoffModel, isStale, leadFallback, leadPauseFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -198,6 +198,13 @@ const staleLogged = new Set<string>()
 const MAX_STALE_MINUTES = 1440
 let agentStaleMinutes = 30
 let staleTimer: Timer | undefined
+// Subagent che hanno già consegnato (taskStatus completed o fine turno vista senza un nuovo inizio) ma restano
+// attivi, per esempio per un loro processo in background: avvisati subito, fermati con TaskStop dopo DELIVERED_GRACE_MS.
+const DELIVERED_GRACE_MS = 2 * 60_000
+const endedAgents = new Set<string>()
+const deliveredSince = new Map<string, number>()
+const stoppedAgents = new Set<string>()
+const leadAsked = new Set<string>()
 // Contesto dell'ultimo passo di ogni agente (turn.step), in token: le zone degli agenti sono in token assoluti.
 const agentTokens = new Map<string, number>()
 // Il percorso dell'handoff dato a ogni agente con la prima nota: resta quello anche dopo un /clear della principale.
@@ -1071,7 +1078,8 @@ const isPanelTeammate = (agent: AgentInfo) => agent.teammateId !== undefined && 
 
 const activeAgents = async ($: EngineInterface, ending?: string) => {
   const busy = (await orElse($.agent.list(), [] as readonly AgentInfo[])).filter(
-    agent => BUSY.includes(agent.status) && !ownAgents.has(agent.id) && agent.type !== VALIDATOR && agent.id !== ending,
+    agent =>
+      BUSY.includes(agent.status) && !ownAgents.has(agent.id) && !stoppedAgents.has(agent.id) && agent.type !== VALIDATOR && agent.id !== ending,
   )
   const now = await $.clock.now()
   return busy.filter(agent => {
@@ -1106,14 +1114,67 @@ const cancelStaleCheck = () => {
 
 const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now: number) => {
   cancelStaleCheck()
-  if (!(agentStaleMinutes > 0)) return
-  const expiring = busy.filter(agent => !isPanelTeammate(agent))
-  if (expiring.length === 0) return
-  const due = Math.min(...expiring.map(agent => (lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000))
-  staleTimer = $.clock.after(Math.max(1, due - now), () => {
+  const dues: number[] = []
+  for (const agent of busy) {
+    const since = deliveredSince.get(agent.id)
+    // Un consegnato già passato alla principale (TaskStop rifiutato) torna alla sola scadenza.
+    if (since !== undefined && !leadAsked.has(agent.id)) dues.push(since + DELIVERED_GRACE_MS)
+    else if (agentStaleMinutes > 0 && !isPanelTeammate(agent)) dues.push((lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000)
+  }
+  if (dues.length === 0) return
+  staleTimer = $.clock.after(Math.max(1, Math.min(...dues) - now), () => {
     staleTimer = undefined
-    tryClear($, 'agenti senza attività').catch((error: unknown) => log($, `clear non controllato: ${errorText(error)}`))
+    tryClear($, 'controllo a tempo degli agenti').catch((error: unknown) => log($, `clear non controllato: ${errorText(error)}`))
   })
+}
+
+// Un subagent che ha già consegnato: il motore lo dà completed come task, o la mod ne ha visto la fine turno
+// senza un nuovo inizio. I teammate tornano running tra un turno e l'altro: mai consegnati.
+const isDelivered = (agent: AgentInfo) =>
+  agent.teammateId === undefined && (agent.taskStatus === 'completed' || endedAgents.has(agent.id))
+
+const agentLabel = (agent: AgentInfo) => `«${agent.description}» (${agent.id})`
+
+// Con il clear rimandato: i consegnati si segnalano alla prima vista e si fermano con TaskStop dopo
+// DELIVERED_GRACE_MS (hanno già dato il report). Se TaskStop non riesce, la principale riceve una volta la richiesta.
+// Risponde gli id fermati.
+const stopDelivered = async ($: EngineInterface, busy: readonly AgentInfo[], now: number) => {
+  const stopped = new Set<string>()
+  for (const agent of busy.filter(isDelivered)) {
+    const since = deliveredSince.get(agent.id)
+    if (since === undefined) {
+      deliveredSince.set(agent.id, now)
+      const text = `${agentLabel(agent)} ha consegnato ma resta attivo e trattiene il clear: lo fermo tra ${DELIVERED_GRACE_MS / 60_000} minuti (TaskStop ${agent.id})`
+      $.ui.toast(`auto-clear-context: ${text}`)
+      log($, text)
+      continue
+    }
+    if (now - since < DELIVERED_GRACE_MS || leadAsked.has(agent.id)) continue
+    let refused: string | undefined
+    try {
+      refused = refusalOf(await $.tool.call({ tool: 'TaskStop', task_id: agent.id }))
+    } catch (error) {
+      refused = errorText(error)
+    }
+    if (refused === undefined) {
+      stopped.add(agent.id)
+      stoppedAgents.add(agent.id)
+      deliveredSince.delete(agent.id)
+      const text = `agente ${agentLabel(agent)} fermato con TaskStop: aveva consegnato ma tratteneva il clear`
+      $.ui.toast(`auto-clear-context: ${text}`)
+      log($, text)
+      continue
+    }
+    leadAsked.add(agent.id)
+    log($, `agente ${agentLabel(agent)}: TaskStop non riuscito (${refused}); richiesta alla principale`)
+    $.prompt.submit({ text: deliveredLeadNote(agent.description, agent.id, refused) }).then(
+      submitted => {
+        if (submitted.drop !== undefined) log($, `richiesta di TaskStop alla principale scartata: ${submitted.drop}`)
+      },
+      error => log($, `richiesta di TaskStop alla principale rifiutata: ${errorText(error)}`),
+    )
+  }
+  return stopped
 }
 
 const resetDeferral = () => {
@@ -1121,6 +1182,8 @@ const resetDeferral = () => {
   deferredId = undefined
   isDeferWarned = false
   pausedFor.clear()
+  deliveredSince.clear()
+  leadAsked.clear()
   cancelStaleCheck()
 }
 
@@ -1171,14 +1234,16 @@ const tryClear = async ($: EngineInterface, reason: string, ending?: string) => 
       log($, `limite di ${maxClearsPerHour} clear in un'ora raggiunto: l'handoff ${handoff.id} resta in attesa`)
       return
     }
-    const busy = await activeAgents($, ending)
+    const listed = await activeAgents($, ending)
+    if (listed.length > 0 && deferredId !== handoff.id) {
+      resetDeferral()
+      deferredId = handoff.id
+      deferredSince = now
+      log($, `handoff ${handoff.id} validato, ma ${listed.length} agenti ancora attivi: clear rimandato a quando si fermano (${reason})`)
+    }
+    const stopped = await stopDelivered($, listed, now)
+    const busy = listed.filter(agent => !stopped.has(agent.id))
     if (busy.length > 0) {
-      if (deferredId !== handoff.id) {
-        resetDeferral()
-        deferredId = handoff.id
-        deferredSince = now
-        log($, `handoff ${handoff.id} validato, ma ${busy.length} agenti ancora attivi: clear rimandato a quando si fermano (${reason})`)
-      }
       await warnLongDeferral($)
       scheduleStaleCheck($, busy, now)
       return
@@ -1311,6 +1376,7 @@ export const register: Register = (on, options) => {
   // La principale in un turno: il clear aspetta la sua fine turno, anche se un agente si ferma prima.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) isMainBusy = true
+    else endedAgents.delete(e.agentId)
     await markSeen($, e.agentId)
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -1322,6 +1388,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId !== undefined) {
       const agentId = e.agentId
+      if (!e.isAborted) endedAgents.add(agentId)
       if (e.isAborted) {
         // Validatore annullato: si libera il teammate, il suo prossimo turno rilancia lo stesso giro.
         const job = validating.get(agentId)

@@ -182,6 +182,9 @@ export const leadFallback = (name: string, path: string, reason: string) =>
 export const leadPauseFallback = (name: string, path: string, reason: string) =>
   `La mod auto-clear-context non è riuscita a fermare il teammate «${name}» (${reason}): il suo handoff di pausa è validato in ${path}. Fai TaskStop sul teammate ${name} e non rilanciarlo: si riprende più tardi da quel file.`
 
+export const deliveredLeadNote = (name: string, agentId: string, reason: string) =>
+  `La mod auto-clear-context non è riuscita a fermare il subagent «${name}» (${reason}): ha già consegnato il report ma resta attivo e trattiene il /clear dell'handoff validato. Fai TaskStop ${agentId} e chiudi il turno: il clear parte a fine turno.`
+
 // Un agente dato attivo ma senza eventi da `minutes` minuti è stantio. 0 spegne la scadenza.
 export const isStale = (lastSeen: number, now: number, minutes: number): boolean =>
   minutes > 0 && now - lastSeen >= minutes * 60_000

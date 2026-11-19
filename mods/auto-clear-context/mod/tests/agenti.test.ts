@@ -1128,3 +1128,108 @@ test('agentStaleMinutes enorme: limitato a 1440 minuti', { options: { agentStale
   await settled()
   expect(state.commands).toEqual(['clear'])
 })
+
+// Agenti che hanno già consegnato ma restano attivi (caso del 19/11: un subagent con il report dato e un suo
+// processo in background): avviso subito, TaskStop dopo 2 minuti e clear, senza eventi nuovi.
+const delivered = () => [
+  { id: 'a1', type: 'animatore', description: 'wide-guard', status: 'running', taskStatus: 'completed', kind: 'local_agent' },
+  validator('v1'),
+]
+const taskStops = (state: { toolCalls: Record<string, unknown>[] }) => state.toolCalls.filter(call => call.tool === 'TaskStop')
+
+test('caso 19/11: subagent consegnato con processo in background, principale ferma: avviso, TaskStop e clear', async ($, on) => {
+  const state = world(on, delivered())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.commands).toEqual([])
+  expect(state.toasts.length).toBe(1)
+  expect(state.toasts[0]).toContain('wide-guard')
+  expect(state.toasts[0]).toContain('TaskStop a1')
+  expect(taskStops(state)).toEqual([])
+  await state.clock.advance(2 * 60_000)
+  await settled()
+  expect(taskStops(state).map(call => call.task_id)).toEqual(['a1'])
+  expect(state.toasts.some(text => text.includes('fermato') && text.includes('wide-guard'))).toBe(true)
+  expect(state.logs.some(line => line.includes('fermato') && line.includes('wide-guard'))).toBe(true)
+  expect(state.commands).toEqual(['clear'])
+})
+
+test('subagent che ha finito il turno ma resta running nella lista: consegnato anche senza taskStatus', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  // La fine turno dell'agente arriva mentre la principale lavora (la sua notifica): nessun controllo lì.
+  await $.turn.start(mainStart('m2'))
+  await turnEnd($, 'a1')
+  await settled()
+  await $.turn.complete(mainDone('m2'))
+  await settled()
+  expect(state.commands).toEqual([])
+  await state.clock.advance(2 * 60_000)
+  await settled()
+  expect(taskStops(state).map(call => call.task_id)).toEqual(['a1'])
+  expect(state.commands).toEqual(['clear'])
+})
+
+test('subagent consegnato e poi ripreso (nuovo turno): non viene fermato', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.start(mainStart('m2'))
+  await turnEnd($, 'a1')
+  await $.turn.start({ text: 'x', turnId: 't2', agentId: 'a1' } as never)
+  await $.turn.complete(mainDone('m2'))
+  await settled()
+  await state.clock.advance(5 * 60_000)
+  await settled()
+  expect(taskStops(state)).toEqual([])
+  expect(state.commands).toEqual([])
+})
+
+test('agente al lavoro (non consegnato): nessun TaskStop, il clear aspetta', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(10 * 60_000)
+  await settled()
+  expect(taskStops(state)).toEqual([])
+  expect(state.commands).toEqual([])
+})
+
+test('TaskStop rifiutato: una sola richiesta alla principale con nome e comando, niente clear', async ($, on) => {
+  const state = world(on, delivered())
+  state.denied.set('TaskStop', 'negato')
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(2 * 60_000)
+  await settled()
+  expect(state.prompts.length).toBe(1)
+  expect(state.prompts[0]).toContain('wide-guard')
+  expect(state.prompts[0]).toContain('TaskStop a1')
+  expect(state.commands).toEqual([])
+  await $.turn.complete(mainDone('m2'))
+  await state.clock.advance(5 * 60_000)
+  await settled()
+  expect(state.prompts.length).toBe(1)
+})
+
+test('teammate con taskStatus completed non è trattato come consegnato', async ($, on) => {
+  const state = world(on, [{ id: 'a1', teammateId: 'w@t', type: 'teammate', description: 'x', status: 'running', taskStatus: 'completed' }, validator('v1')])
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(5 * 60_000)
+  await settled()
+  expect(taskStops(state)).toEqual([])
+})
+
+test('consegnato con agentStaleMinutes 0: il timer dei 2 minuti parte lo stesso', { options: { agentStaleMinutes: 0 } }, async ($, on) => {
+  const state = world(on, delivered())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(2 * 60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})
