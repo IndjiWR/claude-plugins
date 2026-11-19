@@ -848,7 +848,7 @@ test('turn.complete di un agente senza handoff della principale: nessun clear', 
   expect(state.commands).toEqual([])
 })
 
-test('dopo 20 minuti di rinvio un solo avviso, senza forzare il clear', async ($, on) => {
+test('dopo 20 minuti di rinvio un solo avviso, senza forzare il clear', { options: { deliveredStopMinutes: 0 } }, async ($, on) => {
   // a2 resta running: il turn.complete di a1 alla fine non libera il clear.
   const state = world(on, [...running(), { id: 'a2', type: 'general-purpose', description: 'y', status: 'running' }])
   state.files.set(MAIN_FILE, MAIN_VALIDATED)
@@ -1032,7 +1032,7 @@ test('agente stantio che torna attivo trattiene di nuovo il clear e può essere 
   expect(a1Logs().length).toBe(2)
 })
 
-test('più rinvii: un solo timer armato, il precedente non scatta', async ($, on) => {
+test('più rinvii: un solo timer armato, il precedente non scatta', { options: { deliveredStopMinutes: 0 } }, async ($, on) => {
   const state = world(on, twoRunning())
   state.files.set(MAIN_FILE, MAIN_VALIDATED)
   await $.turn.complete(mainDone())
@@ -1090,7 +1090,7 @@ const handoffId = (text: string) => {
   return `${hash.toString(16).padStart(8, '0')}${text.length.toString(16)}`
 }
 
-test("handoff che ha già avuto il suo clear durante il rinvio: il timer della scadenza è cancellato", async ($, on) => {
+test("handoff che ha già avuto il suo clear durante il rinvio: il timer della scadenza è cancellato", { options: { deliveredStopMinutes: 0 } }, async ($, on) => {
   // Il rinvio arma il timer con un handoff; poi la principale lo riscrive con uno che ha già avuto il suo clear.
   const other = MAIN_VALIDATED.replace('Fare y.', 'Fare z.')
   const state = world(on, twoRunning(), { clears: [{ at: 0, handoff: handoffId(other) }] })
@@ -1274,4 +1274,155 @@ test('fine turno vista ma taskStatus running: non consegnato', async ($, on) => 
   await state.clock.advance(5 * 60_000)
   await settled()
   expect(taskStops(state)).toEqual([])
+})
+
+// 0.14.0: un agente che ha consegnato e resta vivo solo per un'attesa in background si ferma sempre, anche senza
+// handoff (caso pokefootleague del 19/11 sera: «Ritocco demo A+B» su un until con sed BSD che non finiva mai).
+const UNTIL = "until [ -n \"$(sed -n '/passed\\|failed\\|error/p' /tmp/out)\" ]; do sleep 3; done"
+const ritocco = (extra: object = {}) => [
+  { id: 'a1', type: 'general-purpose', description: 'Ritocco demo A+B', status: 'waiting', taskStatus: 'completed', kind: 'local_agent', ...extra },
+]
+const backgroundBash = (agentId: string, command = UNTIL) =>
+  ({ tool: 'Bash', command, run_in_background: true, agentId }) as never
+const mainNotes = async ($: Engine) => (await $.tool.call(bash())).context ?? []
+
+test('caso 19/11 sera: consegnato con attesa infinita, nessun handoff: avviso, TaskStop a 5 minuti col comando e nota alla principale', async ($, on) => {
+  const state = world(on, ritocco())
+  await $.tool.call(backgroundBash('a1'))
+  await turnEnd($, 'a1', 'Report: suite verde, c87233b8')
+  await settled()
+  expect(state.toasts.length).toBe(1)
+  expect(state.toasts[0]).toContain('Ritocco demo A+B')
+  expect(state.toasts[0]).toContain('5 minuti')
+  expect(state.toasts[0]).toContain('until')
+  await state.clock.advance(4 * 60_000)
+  await settled()
+  expect(taskStops(state)).toEqual([])
+  await state.clock.advance(60_000)
+  await settled()
+  expect(taskStops(state).map(call => call.task_id)).toEqual(['a1'])
+  const stop = state.toasts.find(text => text.includes('fermato'))
+  expect(stop).toContain('Ritocco demo A+B')
+  expect(stop).toContain('until')
+  expect(stop).toContain('5 minuti')
+  expect(state.logs.some(line => line.includes('fermato') && line.includes('until'))).toBe(true)
+  const [note, ...others] = await mainNotes($)
+  expect(others.length).toBe(0)
+  expect(note).toContain('Ritocco demo A+B')
+  expect(note).toContain('a1')
+  expect(note).toContain('until')
+  expect(await mainNotes($)).toEqual([])
+  expect(state.commands).toEqual([])
+  // Fermato una volta: nessun secondo TaskStop.
+  await state.clock.advance(30 * 60_000)
+  await settled()
+  expect(taskStops(state).length).toBe(1)
+})
+
+test('consegnato visto solo alla fine turno della principale (taskStatus completed): fermato a 5 minuti', async ($, on) => {
+  const state = world(on, ritocco())
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.toasts.length).toBe(1)
+  await state.clock.advance(5 * 60_000)
+  await settled()
+  expect(taskStops(state).map(call => call.task_id)).toEqual(['a1'])
+})
+
+test('consegnato con la principale in un turno: fermato lo stesso alla scadenza', async ($, on) => {
+  const state = world(on, ritocco())
+  await turnEnd($, 'a1')
+  await $.turn.start(mainStart('m2'))
+  await state.clock.advance(5 * 60_000)
+  await settled()
+  expect(taskStops(state).map(call => call.task_id)).toEqual(['a1'])
+})
+
+test('agente non consegnato con una shell in background: mai fermato', async ($, on) => {
+  const state = world(on, [{ id: 'a1', type: 'general-purpose', description: 'x', status: 'waiting', taskStatus: 'running', kind: 'local_agent' }])
+  await $.tool.call(backgroundBash('a1'))
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(120 * 60_000)
+  await settled()
+  expect(taskStops(state)).toEqual([])
+})
+
+test('consegnato e ripreso prima della scadenza: non fermato', async ($, on) => {
+  const state = world(on, running())
+  await turnEnd($, 'a1')
+  await settled()
+  expect(state.toasts.length).toBe(1)
+  await $.turn.start({ text: 'x', turnId: 't2', agentId: 'a1' } as never)
+  await state.clock.advance(10 * 60_000)
+  await settled()
+  expect(taskStops(state)).toEqual([])
+})
+
+test('deliveredStopMinutes 3: fermato a 3 minuti', { options: { deliveredStopMinutes: 3 } }, async ($, on) => {
+  const state = world(on, ritocco())
+  await turnEnd($, 'a1')
+  await settled()
+  expect(state.toasts[0]).toContain('3 minuti')
+  await state.clock.advance(3 * 60_000)
+  await settled()
+  expect(taskStops(state).map(call => call.task_id)).toEqual(['a1'])
+})
+
+test('deliveredStopMinutes 0: nessun avviso e nessuno stop senza handoff', { options: { deliveredStopMinutes: 0 } }, async ($, on) => {
+  const state = world(on, ritocco())
+  await turnEnd($, 'a1')
+  await state.clock.advance(60 * 60_000)
+  await settled()
+  expect(state.toasts).toEqual([])
+  expect(taskStops(state)).toEqual([])
+})
+
+test('teammate trattenuto da una shell dopo la fine turno (waiting): fermato; idle no', async ($, on) => {
+  const state = world(on, [
+    { id: 't1', teammateId: 'ritocco@team', type: 'teammate', description: 'Ritocco', status: 'waiting', taskStatus: 'running', kind: 'in_process_teammate' },
+    { id: 't2', teammateId: 'altro@team', type: 'teammate', description: 'Altro', status: 'idle', taskStatus: 'running', kind: 'in_process_teammate' },
+  ])
+  await $.tool.call(backgroundBash('t1'))
+  await turnEnd($, 't1')
+  await turnEnd($, 't2')
+  await state.clock.advance(5 * 60_000)
+  await settled()
+  expect(taskStops(state).map(call => call.task_id)).toEqual(['t1'])
+})
+
+test('teammate waiting senza fine turno vista: non consegnato', async ($, on) => {
+  const state = world(on, [{ id: 't1', teammateId: 'r@team', type: 'teammate', description: 'R', status: 'waiting', taskStatus: 'running', kind: 'in_process_teammate' }])
+  await $.turn.complete(mainDone())
+  await state.clock.advance(60 * 60_000)
+  await settled()
+  expect(taskStops(state)).toEqual([])
+})
+
+test('TaskStop rifiutato senza handoff: una sola richiesta alla principale con nome, comando e TaskStop', async ($, on) => {
+  const state = world(on, ritocco())
+  state.denied.set('TaskStop', 'negato')
+  await $.tool.call(backgroundBash('a1'))
+  await turnEnd($, 'a1')
+  await state.clock.advance(5 * 60_000)
+  await settled()
+  expect(state.prompts.length).toBe(1)
+  expect(state.prompts[0]).toContain('Ritocco demo A+B')
+  expect(state.prompts[0]).toContain('TaskStop a1')
+  expect(state.prompts[0]).toContain('until')
+  await $.turn.complete(mainDone('m2'))
+  await state.clock.advance(30 * 60_000)
+  await settled()
+  expect(state.prompts.length).toBe(1)
+})
+
+test('fine turno della principale senza handoff non azzera il conto del consegnato', async ($, on) => {
+  const state = world(on, ritocco())
+  await turnEnd($, 'a1')
+  for (let minute = 0; minute < 5; minute++) {
+    await state.clock.advance(60_000)
+    await $.turn.complete(mainDone(`m${minute}`))
+    await settled()
+  }
+  expect(taskStops(state).map(call => call.task_id)).toEqual(['a1'])
 })
