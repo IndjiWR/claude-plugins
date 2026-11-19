@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, ConfigRow, EngineInterface, Register, SessionUsage, Timer } from 'claude-code'
 
-import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, capByTokens, deliveredLeadNote, formatK, appendGaps, handoffModel, isStale, leadFallback, leadPauseFallback, parseVerdict, pauseNote, resumedHandoff, setFront } from './agents'
+import { agentHandoffPath, agentLimits, agentResume, agentZoneNote, agentZoneOf, capByTokens, deliveredLeadNote, deliveredStoppedNote, formatK, appendGaps, handoffModel, isStale, leadFallback, leadPauseFallback, parseVerdict, pauseNote, resumedHandoff, setFront, waitingOn } from './agents'
 import type { AgentKind } from './agents'
 import type { AgentInput, ThresholdField, ThresholdNotice, ThresholdWrite, ThresholdZone } from '../types'
 
@@ -201,6 +201,15 @@ let staleTimer: Timer | undefined
 // Subagent che hanno già consegnato (taskStatus completed o fine turno vista senza un nuovo inizio) ma restano
 // attivi, per esempio per un loro processo in background: avvisati subito, fermati con TaskStop dopo DELIVERED_GRACE_MS.
 const DELIVERED_GRACE_MS = 2 * 60_000
+// Anche senza clear rimandato: un consegnato si ferma dopo deliveredStopMinutes (0 = mai), con un timer proprio.
+let deliveredStopMinutes = 5
+let deliveredTimer: Timer | undefined
+// Gli agenti con un TaskStop in corso: un timer e una fine turno ravvicinati non ne mandano due.
+const stopping = new Set<string>()
+// Per agente, l'ultimo comando lanciato in background (Bash run_in_background, Monitor): avvisi e note lo citano.
+const backgroundCommands = new Map<string, string>()
+// Note per la principale (agenti fermati), allegate al suo prossimo tool o prompt.
+const leadNotes: string[] = []
 const endedAgents = new Set<string>()
 const deliveredSince = new Map<string, number>()
 const stoppedAgents = new Set<string>()
@@ -1130,48 +1139,65 @@ const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now:
 }
 
 // Un subagent che ha già consegnato: il motore lo dà completed come task, o la mod ne ha visto la fine turno
-// senza un nuovo inizio e il motore non lo dà running come task. I teammate tornano running tra un turno e l'altro: mai consegnati.
+// senza un nuovo inizio e il motore non lo dà running come task. Un teammate torna running tra un turno e l'altro:
+// è consegnato solo se, dopo una fine turno vista, resta waiting su una shell sua (idle aspetta un messaggio; un
+// waiting senza shell può essere l'approvazione di un piano) e nessuna validazione del suo handoff è in corso.
 const isDelivered = (agent: AgentInfo) =>
-  agent.teammateId === undefined &&
-  (agent.taskStatus === 'completed' || (endedAgents.has(agent.id) && agent.taskStatus !== 'running'))
+  agent.teammateId === undefined
+    ? agent.taskStatus === 'completed' || (endedAgents.has(agent.id) && agent.taskStatus !== 'running')
+    : !isPanelTeammate(agent) &&
+      endedAgents.has(agent.id) &&
+      agent.status === 'waiting' &&
+      backgroundCommands.has(agent.id) &&
+      !checking.has(agent.id)
 
 const agentLabel = (agent: AgentInfo) => `«${agent.description}» (${agent.id})`
 
-// Con il clear rimandato: i consegnati si segnalano alla prima vista e si fermano con TaskStop dopo
-// DELIVERED_GRACE_MS (hanno già dato il report). Se TaskStop non riesce, la principale riceve una volta la richiesta.
-// Risponde gli id fermati.
-const stopDelivered = async ($: EngineInterface, busy: readonly AgentInfo[], now: number) => {
+// I consegnati si segnalano alla prima vista e si fermano con TaskStop dopo `grace` (hanno già dato il report).
+// Con il clear rimandato (`holdsClear`) la scadenza è DELIVERED_GRACE_MS e il TaskStop aspetta la principale
+// ferma; dalla sorveglianza generale (watchDelivered) è deliveredStopMinutes, anche con la principale in un turno.
+// Se TaskStop non riesce, la principale riceve una volta la richiesta. Risponde gli id fermati.
+const stopDelivered = async ($: EngineInterface, busy: readonly AgentInfo[], now: number, grace = DELIVERED_GRACE_MS, holdsClear = true) => {
   const stopped = new Set<string>()
   // Un agente ripreso dopo l'avviso non è più consegnato: ripartirà da capo se riconsegna.
   for (const agent of busy) if (!isDelivered(agent)) deliveredSince.delete(agent.id)
   for (const agent of busy.filter(isDelivered)) {
+    const command = backgroundCommands.get(agent.id)
     const since = deliveredSince.get(agent.id)
     if (since === undefined) {
       deliveredSince.set(agent.id, now)
-      const text = `${agentLabel(agent)} ha consegnato ma resta attivo e trattiene il clear: lo fermo tra ${DELIVERED_GRACE_MS / 60_000} minuti (TaskStop ${agent.id})`
+      const held = holdsClear ? ' e trattiene il clear' : ''
+      const text = `${agentLabel(agent)} ha consegnato ma resta attivo${waitingOn(command)}${held}: lo fermo tra ${grace / 60_000} minuti (TaskStop ${agent.id})`
       $.ui.toast(`auto-clear-context: ${text}`)
       log($, text)
       continue
     }
-    if (now - since < DELIVERED_GRACE_MS || leadAsked.has(agent.id) || isMainBusy) continue
+    if (now - since < grace || leadAsked.has(agent.id) || stopping.has(agent.id) || (holdsClear && isMainBusy)) continue
+    stopping.add(agent.id)
     let refused: string | undefined
     try {
       refused = refusalOf(await $.tool.call({ tool: 'TaskStop', task_id: agent.id }))
     } catch (error) {
       refused = errorText(error)
+    } finally {
+      stopping.delete(agent.id)
     }
     if (refused === undefined) {
+      const minutes = Math.round((now - since) / 60_000)
       stopped.add(agent.id)
       stoppedAgents.add(agent.id)
       deliveredSince.delete(agent.id)
-      const text = `agente ${agentLabel(agent)} fermato con TaskStop: aveva consegnato ma tratteneva il clear`
+      backgroundCommands.delete(agent.id)
+      const held = holdsClear ? ' e tratteneva il clear' : ''
+      const text = `agente ${agentLabel(agent)} fermato con TaskStop: aveva consegnato ma restava attivo da ${minutes} minuti${waitingOn(command)}${held}`
       $.ui.toast(`auto-clear-context: ${text}`)
       log($, text)
+      leadNotes.push(deliveredStoppedNote(agent.description, agent.id, minutes, command))
       continue
     }
     leadAsked.add(agent.id)
     log($, `agente ${agentLabel(agent)}: TaskStop non riuscito (${refused}); richiesta alla principale`)
-    $.prompt.submit({ text: deliveredLeadNote(agent.description, agent.id, refused) }).then(
+    $.prompt.submit({ text: deliveredLeadNote(agent.description, agent.id, refused, command, holdsClear) }).then(
       submitted => {
         if (submitted.drop !== undefined) log($, `richiesta di TaskStop alla principale scartata: ${submitted.drop}`)
       },
@@ -1181,13 +1207,41 @@ const stopDelivered = async ($: EngineInterface, busy: readonly AgentInfo[], now
   return stopped
 }
 
+// Sorveglianza dei consegnati anche senza handoff: a ogni fine turno e a tempo, alla scadenza più vicina.
+const watchDelivered = async ($: EngineInterface) => {
+  deliveredTimer?.cancel()
+  deliveredTimer = undefined
+  if (deliveredStopMinutes <= 0) return
+  const grace = deliveredStopMinutes * 60_000
+  const list = await orElse($.agent.list(), [] as readonly AgentInfo[])
+  // Agenti spariti dall'elenco: niente conti né comandi rimasti.
+  const listed = new Set(list.map(agent => agent.id))
+  for (const id of [...deliveredSince.keys()]) if (!listed.has(id)) deliveredSince.delete(id)
+  for (const id of [...backgroundCommands.keys()]) if (!listed.has(id)) backgroundCommands.delete(id)
+  for (const id of [...leadAsked]) if (!listed.has(id)) leadAsked.delete(id)
+  const busy = list.filter(
+    agent => BUSY.includes(agent.status) && !ownAgents.has(agent.id) && !stoppedAgents.has(agent.id) && agent.type !== VALIDATOR,
+  )
+  const now = await $.clock.now()
+  const stopped = await stopDelivered($, busy, now, grace, false)
+  const dues = busy
+    .filter(agent => !stopped.has(agent.id) && !leadAsked.has(agent.id) && isDelivered(agent))
+    .map(agent => (deliveredSince.get(agent.id) ?? now) + grace)
+  if (dues.length > 0) {
+    deliveredTimer = $.clock.after(Math.max(1, Math.min(...dues) - now), () => {
+      deliveredTimer = undefined
+      watchDelivered($).catch((error: unknown) => log($, `agenti consegnati non controllati: ${errorText(error)}`))
+    })
+  }
+  // Uno stop può liberare un clear rimandato.
+  if (stopped.size > 0 && deferredId !== undefined && !isMainBusy) await tryClear($, 'agente consegnato fermato')
+}
+
 const resetDeferral = () => {
   deferredSince = undefined
   deferredId = undefined
   isDeferWarned = false
   pausedFor.clear()
-  deliveredSince.clear()
-  leadAsked.clear()
   cancelStaleCheck()
 }
 
@@ -1282,6 +1336,8 @@ export const register: Register = (on, options) => {
   maxRestartsPerHour = maxClearsPerHour
   agentsEnabled = options.agents !== false
   agentStaleMinutes = Math.min(Number(options.agentStaleMinutes ?? 30), MAX_STALE_MINUTES)
+  const stopMinutes = Number(options.deliveredStopMinutes ?? 5)
+  deliveredStopMinutes = Number.isFinite(stopMinutes) ? Math.min(Math.max(stopMinutes, 0), MAX_STALE_MINUTES) : 5
   const tokenOption = (value: unknown, fallback: number) => {
     const n = Number(value ?? fallback)
     return Number.isFinite(n) ? n : fallback
@@ -1365,6 +1421,7 @@ export const register: Register = (on, options) => {
       const text = await (attach.ready ?? attachedHandoff($, attach))
       if (text !== undefined) context.push(text)
     }
+    if (e.command === undefined) context.push(...leadNotes.splice(0))
     const note = pendingNote
     if (note !== undefined) {
       pendingNote = undefined
@@ -1386,6 +1443,8 @@ export const register: Register = (on, options) => {
       deliveredSince.delete(e.agentId)
       stoppedAgents.delete(e.agentId)
       leadAsked.delete(e.agentId)
+      // Contano solo i comandi in background del turno in corso: una shell vecchia non fa un consegnato.
+      backgroundCommands.delete(e.agentId)
     }
     await markSeen($, e.agentId)
     return next(e)
@@ -1415,8 +1474,10 @@ export const register: Register = (on, options) => {
       if (!isMainBusy) {
         await tryClear($, `agente ${short(agentId)} fermo`, agentId).catch((error: unknown) => log($, `clear non controllato: ${errorText(error)}`))
       }
+      await watchDelivered($).catch((error: unknown) => log($, `agenti consegnati non controllati: ${errorText(error)}`))
       return result
     }
+    await watchDelivered($).catch((error: unknown) => log($, `agenti consegnati non controllati: ${errorText(error)}`))
     if (e.isAborted || isClearRequested) return result
     await tryClear($, 'fine turno della principale')
     return result
@@ -1499,8 +1560,13 @@ export const register: Register = (on, options) => {
     await orElse(markSeen($, e.agentId), undefined)
     const result = await next(e)
     if (result.deny !== undefined || next.origin.plugin !== 'engine') return result
+    const call = e as { command?: unknown; run_in_background?: unknown }
+    if (e.agentId !== undefined && typeof call.command === 'string' && (call.run_in_background === true || e.tool === 'Monitor')) {
+      backgroundCommands.set(e.agentId, call.command)
+    }
     try {
-      const notes = await turnNotes($, e.agentId, configured, agentTokensLimits)
+      const zoneNotes = await turnNotes($, e.agentId, configured, agentTokensLimits)
+      const notes = [...(e.agentId === undefined ? leadNotes.splice(0) : []), ...zoneNotes]
       return notes.length === 0 ? result : { ...result, context: [...(result.context ?? []), ...notes] }
     } catch (error) {
       log($, `note durante il turno non controllate: ${errorText(error)}`)

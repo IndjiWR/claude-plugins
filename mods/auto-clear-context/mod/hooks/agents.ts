@@ -182,8 +182,18 @@ export const leadFallback = (name: string, path: string, reason: string) =>
 export const leadPauseFallback = (name: string, path: string, reason: string) =>
   `La mod auto-clear-context non è riuscita a fermare il teammate «${name}» (${reason}): il suo handoff di pausa è validato in ${path}. Fai TaskStop sul teammate ${name} e non rilanciarlo: si riprende più tardi da quel file.`
 
-export const deliveredLeadNote = (name: string, agentId: string, reason: string) =>
-  `La mod auto-clear-context non è riuscita a fermare il subagent «${name}» (${reason}): ha già consegnato il report ma resta attivo e trattiene il /clear dell'handoff validato. Fai TaskStop ${agentId} e chiudi il turno: il clear parte a fine turno.`
+// Il comando della shell in attesa, per avvisi e note: tra «», al più 200 caratteri.
+export const waitingOn = (command: string | undefined) =>
+  command === undefined ? '' : ` in attesa di «${command.length > 200 ? `${command.slice(0, 200)}…` : command}»`
+
+export const deliveredLeadNote = (name: string, agentId: string, reason: string, command?: string, holdsClear = true) =>
+  holdsClear
+    ? `La mod auto-clear-context non è riuscita a fermare il subagent «${name}» (${reason}): ha già consegnato il report ma resta attivo${waitingOn(command)} e trattiene il /clear dell'handoff validato. Fai TaskStop ${agentId} e chiudi il turno: il clear parte a fine turno.`
+    : `La mod auto-clear-context non è riuscita a fermare l'agente «${name}» (${reason}): ha già consegnato il report ma resta attivo${waitingOn(command)}. Fai TaskStop ${agentId} (ferma anche la sua shell) e chiudi il turno.`
+
+// La nota alla principale dopo lo stop di un agente consegnato, nel context del suo prossimo tool o prompt.
+export const deliveredStoppedNote = (name: string, agentId: string, minutes: number, command?: string) =>
+  `La mod auto-clear-context ha fermato con TaskStop l'agente «${name}» (${agentId}): aveva già consegnato il report ma restava attivo da ${minutes} minuti${waitingOn(command)}. Il suo report resta valido; se ti serviva quell'attesa, rilanciala con una scadenza.`
 
 // Un agente dato attivo ma senza eventi da `minutes` minuti è stantio. 0 spegne la scadenza.
 export const isStale = (lastSeen: number, now: number, minutes: number): boolean =>
