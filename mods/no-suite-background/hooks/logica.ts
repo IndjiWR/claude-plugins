@@ -225,8 +225,9 @@ function tokPesanti(cmd: string, cfg: Config, prof: number): string[][] {
   })
 }
 
-const PAROLA_PYTEST = /(^|[\s;&|(/"'`])(py\.test|pytest)(?=$|[\s;&|)"'`])/g
-const SILENZIO = /^-[A-Za-z]*[qv][A-Za-z]*$|^--(quiet|verbose)$/
+// Seguita da virgoletta (`"pytest" tests`) l'inserimento finirebbe dentro il nome del programma: non si tocca.
+const PAROLA_PYTEST = /(^|[\s;&|(/"'`])(py\.test|pytest)(?=$|[\s;&|)])/g
+const SILENZIO = /^-[A-Za-z]*[qv][A-Za-z]*$|^--(quiet|verbose)$|^--verbosity(=|$)/
 
 /** Con `riassunto`: il comando con `-q --tb=line` dopo la parola pytest, se l'unico comando pesante è pytest senza
  * `-q`/`-v`. undefined se non si tocca (la parola pytest compare più volte nel testo: non si sa quale sia). */

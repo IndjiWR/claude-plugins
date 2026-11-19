@@ -108,6 +108,11 @@ test('riassunto: -q, --quiet, -v, --verbose, -xq presenti -> intatto; --tb prese
 
 test('riassunto: altri comandi pesanti, pytest nominato più volte, nessuna pipe aggiunta', () => {
   expect(rias('tools/suite.sh tests')).toBe(undefined)
+  expect(rias('"pytest" tests')).toBe(undefined)
+  expect(rias("'pytest' tests")).toBe(undefined)
+  expect(rias("bash -c 'pytest tests'")).toBe("bash -c 'pytest -q --tb=line tests'")
+  expect(rias('pytest --verbosity=2 tests')).toBe(undefined)
+  expect(rias('pytest -p pytest-xdist tests')).toBe('pytest -q --tb=line -p pytest-xdist tests')
   expect(rias('grep -n pytest conftest.py && pytest tests')).toBe(undefined)
   expect(rias('echo pytest; tools/suite.sh')).toBe(undefined)
   expect(rias('pytest tests 2>&1 | tail -5')).toBe('pytest -q --tb=line tests 2>&1 | tail -5')

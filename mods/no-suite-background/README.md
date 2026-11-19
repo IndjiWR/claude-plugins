@@ -18,7 +18,8 @@ Con `timeout` assente, non numerico o sotto `timeoutMinimo` non rifiuta più (da
 con `timeout` = `timeoutMinimo` e lo lascia passare, senza far perdere un turno all'agente.
 
 Con `riassunto: true`, se l'unico comando pesante è pytest (`pytest`, `py.test`, `python -m pytest`, anche dietro
-`uv run`, `cd x &&` o `bash -c`) senza `-q`/`--quiet`/`-v`/`--verbose` (anche combinati, `-xq`), aggiunge
+`uv run`, `cd x &&` o `bash -c`) senza `-q`/`--quiet`/`-v`/`--verbose`/`--verbosity` sulla riga (anche combinati, `-xq`; `addopts` di
+`pytest.ini` non è letto), aggiunge
 `-q --tb=line` subito dopo `pytest` (solo `-q` se c'è già `--tb`). Nessuna pipe aggiunta: il codice d'uscita resta
 quello di pytest. Se la parola `pytest` compare più volte nel comando (`grep pytest x && pytest`) non tocca niente.
 
