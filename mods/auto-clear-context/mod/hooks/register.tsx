@@ -1218,6 +1218,7 @@ const watchDelivered = async ($: EngineInterface) => {
   const listed = new Set(list.map(agent => agent.id))
   for (const id of [...deliveredSince.keys()]) if (!listed.has(id)) deliveredSince.delete(id)
   for (const id of [...backgroundCommands.keys()]) if (!listed.has(id)) backgroundCommands.delete(id)
+  for (const id of [...leadAsked]) if (!listed.has(id)) leadAsked.delete(id)
   const busy = list.filter(
     agent => BUSY.includes(agent.status) && !ownAgents.has(agent.id) && !stoppedAgents.has(agent.id) && agent.type !== VALIDATOR,
   )
@@ -1442,6 +1443,8 @@ export const register: Register = (on, options) => {
       deliveredSince.delete(e.agentId)
       stoppedAgents.delete(e.agentId)
       leadAsked.delete(e.agentId)
+      // Contano solo i comandi in background del turno in corso: una shell vecchia non fa un consegnato.
+      backgroundCommands.delete(e.agentId)
     }
     await markSeen($, e.agentId)
     return next(e)
@@ -1562,7 +1565,8 @@ export const register: Register = (on, options) => {
       backgroundCommands.set(e.agentId, call.command)
     }
     try {
-      const notes = [...(e.agentId === undefined ? leadNotes.splice(0) : []), ...(await turnNotes($, e.agentId, configured, agentTokensLimits))]
+      const zoneNotes = await turnNotes($, e.agentId, configured, agentTokensLimits)
+      const notes = [...(e.agentId === undefined ? leadNotes.splice(0) : []), ...zoneNotes]
       return notes.length === 0 ? result : { ...result, context: [...(result.context ?? []), ...notes] }
     } catch (error) {
       log($, `note durante il turno non controllate: ${errorText(error)}`)

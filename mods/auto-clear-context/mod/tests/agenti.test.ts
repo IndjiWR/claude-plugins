@@ -1426,3 +1426,14 @@ test('fine turno della principale senza handoff non azzera il conto del consegna
   }
   expect(taskStops(state).map(call => call.task_id)).toEqual(['a1'])
 })
+
+test('teammate con una shell lanciata in un turno precedente, waiting dopo un turno senza shell: non fermato', async ($, on) => {
+  const state = world(on, [{ id: 't1', teammateId: 'r@team', type: 'teammate', description: 'R', status: 'waiting', taskStatus: 'running', kind: 'in_process_teammate' }])
+  await $.tool.call(backgroundBash('t1'))
+  await turnEnd($, 't1')
+  await $.turn.start({ text: 'x', turnId: 't2', agentId: 't1' } as never)
+  await $.turn.complete(done('t1'))
+  await state.clock.advance(60 * 60_000)
+  await settled()
+  expect(taskStops(state)).toEqual([])
+})
