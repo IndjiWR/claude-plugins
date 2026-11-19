@@ -1385,6 +1385,7 @@ export const register: Register = (on, options) => {
       endedAgents.delete(e.agentId)
       deliveredSince.delete(e.agentId)
       stoppedAgents.delete(e.agentId)
+      leadAsked.delete(e.agentId)
     }
     await markSeen($, e.agentId)
     return next(e)
