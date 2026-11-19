@@ -1117,8 +1117,9 @@ const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now:
   const dues: number[] = []
   for (const agent of busy) {
     const since = deliveredSince.get(agent.id)
-    // Un consegnato già passato alla principale (TaskStop rifiutato) torna alla sola scadenza.
-    if (since !== undefined && !leadAsked.has(agent.id)) dues.push(since + DELIVERED_GRACE_MS)
+    // Un consegnato già passato alla principale (TaskStop rifiutato) torna alla sola scadenza; con la principale
+    // in un turno il TaskStop aspetta la sua fine turno, che ricontrolla da sola.
+    if (since !== undefined && isDelivered(agent) && !leadAsked.has(agent.id) && !isMainBusy) dues.push(since + DELIVERED_GRACE_MS)
     else if (agentStaleMinutes > 0 && !isPanelTeammate(agent)) dues.push((lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000)
   }
   if (dues.length === 0) return
@@ -1129,9 +1130,10 @@ const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now:
 }
 
 // Un subagent che ha già consegnato: il motore lo dà completed come task, o la mod ne ha visto la fine turno
-// senza un nuovo inizio. I teammate tornano running tra un turno e l'altro: mai consegnati.
+// senza un nuovo inizio e il motore non lo dà running come task. I teammate tornano running tra un turno e l'altro: mai consegnati.
 const isDelivered = (agent: AgentInfo) =>
-  agent.teammateId === undefined && (agent.taskStatus === 'completed' || endedAgents.has(agent.id))
+  agent.teammateId === undefined &&
+  (agent.taskStatus === 'completed' || (endedAgents.has(agent.id) && agent.taskStatus !== 'running'))
 
 const agentLabel = (agent: AgentInfo) => `«${agent.description}» (${agent.id})`
 
@@ -1140,6 +1142,8 @@ const agentLabel = (agent: AgentInfo) => `«${agent.description}» (${agent.id})
 // Risponde gli id fermati.
 const stopDelivered = async ($: EngineInterface, busy: readonly AgentInfo[], now: number) => {
   const stopped = new Set<string>()
+  // Un agente ripreso dopo l'avviso non è più consegnato: ripartirà da capo se riconsegna.
+  for (const agent of busy) if (!isDelivered(agent)) deliveredSince.delete(agent.id)
   for (const agent of busy.filter(isDelivered)) {
     const since = deliveredSince.get(agent.id)
     if (since === undefined) {
@@ -1149,7 +1153,7 @@ const stopDelivered = async ($: EngineInterface, busy: readonly AgentInfo[], now
       log($, text)
       continue
     }
-    if (now - since < DELIVERED_GRACE_MS || leadAsked.has(agent.id)) continue
+    if (now - since < DELIVERED_GRACE_MS || leadAsked.has(agent.id) || isMainBusy) continue
     let refused: string | undefined
     try {
       refused = refusalOf(await $.tool.call({ tool: 'TaskStop', task_id: agent.id }))
@@ -1376,7 +1380,12 @@ export const register: Register = (on, options) => {
   // La principale in un turno: il clear aspetta la sua fine turno, anche se un agente si ferma prima.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) isMainBusy = true
-    else endedAgents.delete(e.agentId)
+    else {
+      // L'agente riparte (anche ripreso dopo un TaskStop): non è più consegnato né fermato.
+      endedAgents.delete(e.agentId)
+      deliveredSince.delete(e.agentId)
+      stoppedAgents.delete(e.agentId)
+    }
     await markSeen($, e.agentId)
     return next(e)
   }).catch(($, e, next) => next(e))
