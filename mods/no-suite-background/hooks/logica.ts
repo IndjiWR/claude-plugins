@@ -11,6 +11,7 @@ export type Config = {
   timeoutMinimo: number
   maxSullaMacchina: number
   controlloProcessi: boolean
+  riassunto: boolean
 }
 
 export type Processo = { pid: number; ppid: number; eta: number; cmd: string; albero?: string | null; cwd?: string | null }
@@ -192,12 +193,14 @@ export function configurazione(testo: string | undefined): Config | null {
     timeoutMinimo: tm,
     maxSullaMacchina: mx,
     controlloProcessi: typeof o.controlloProcessi === 'boolean' ? o.controlloProcessi : true,
+    riassunto: o.riassunto === true,
   }
 }
 
 export type InputBash = { command?: unknown; run_in_background?: unknown; timeout?: unknown }
 
-/** Il motivo del rifiuto per un Bash, senza guardare i processi; undefined se passa. */
+/** Il motivo del rifiuto per un Bash, senza guardare i processi; undefined se passa. Il timeout basso non si
+ * rifiuta: lo corregge `correggi`. */
 export function decidi(input: InputBash, cfg: Config): string | undefined {
   const cmd = typeof input.command === 'string' ? input.command : ''
   const n = quantiPesanti(cmd, cfg)
@@ -209,13 +212,48 @@ export function decidi(input: InputBash, cfg: Config): string | undefined {
     return `un solo comando pesante (${elenco}) per Bash: insieme possono superare i 10 minuti e l'harness li sposta ` +
       `in background; lanciali in Bash separati, ognuno con timeout ${cfg.timeoutMinimo}`
   }
+  return undefined
+}
+
+/** I token (normalizzati) dei comandi pesanti, anche dentro `bash -c "…"`. */
+function tokPesanti(cmd: string, cfg: Config, prof: number): string[][] {
+  return parti(cmd).flatMap(p => {
+    const t = normalizza(p)
+    const interno = stringaShell(t)
+    if (interno !== undefined && prof < 4) return tokPesanti(interno, cfg, prof + 1)
+    return cfg.voci.some(v => corrisponde(t, v)) ? [t] : []
+  })
+}
+
+const PAROLA_PYTEST = /(^|[\s;&|(/"'`])(py\.test|pytest)(?=$|[\s;&|)"'`])/g
+const SILENZIO = /^-[A-Za-z]*[qv][A-Za-z]*$|^--(quiet|verbose)$/
+
+/** Con `riassunto`: il comando con `-q --tb=line` dopo la parola pytest, se l'unico comando pesante è pytest senza
+ * `-q`/`-v`. undefined se non si tocca (la parola pytest compare più volte nel testo: non si sa quale sia). */
+function riassunto(cmd: string, cfg: Config): string | undefined {
+  const [t] = tokPesanti(cmd, cfg, 0)
+  if (!t || !['pytest', 'py.test'].includes(base(t[0] ?? ''))) return undefined
+  const arg = t.slice(1)
+  if (arg.some(a => SILENZIO.test(a))) return undefined
+  const trovate = [...cmd.matchAll(PAROLA_PYTEST)]
+  if (trovate.length !== 1) return undefined
+  const fine = (trovate[0]?.index ?? 0) + (trovate[0]?.[0].length ?? 0)
+  const extra = arg.some(a => a === '--tb' || a.startsWith('--tb=')) ? ' -q' : ' -q --tb=line'
+  return cmd.slice(0, fine) + extra + cmd.slice(fine)
+}
+
+/** I campi da riscrivere in un Bash con un solo comando pesante in primo piano: `timeout` portato a `timeoutMinimo`
+ * se assente o più basso; con `riassunto`, `command` con `-q --tb=line`. undefined se non c'è niente da cambiare. */
+export function correggi(input: InputBash, cfg: Config): { timeout?: number; command?: string } | undefined {
+  if (typeof input.command !== 'string' || decidi(input, cfg) !== undefined) return undefined
+  if (quantiPesanti(input.command, cfg) !== 1) return undefined
+  const out: { timeout?: number; command?: string } = {}
   const v = Number(input.timeout ?? 0)
   const t = Number.isFinite(v) ? Math.trunc(v) : 0
-  if (t < cfg.timeoutMinimo) {
-    return `timeout ${t || 'assente'}: passa timeout ${cfg.timeoutMinimo} (col timeout predefinito di 120 s il comando ` +
-      `finisce in background e l'agente resta fermo); ${motivo}`
-  }
-  return undefined
+  if (t < cfg.timeoutMinimo) out.timeout = cfg.timeoutMinimo
+  const c = cfg.riassunto ? riassunto(input.command, cfg) : undefined
+  if (c !== undefined) out.command = c
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 export function etaSecondi(e: string): number {

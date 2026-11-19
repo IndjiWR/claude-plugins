@@ -21,6 +21,7 @@ const world = (on: On) => {
     toplevel: new Map<string, string>(),
     runs: [] as string[][],
     eseguiti: [] as string[],
+    input: [] as { command: string; timeout?: number }[],
     logs: [] as string[],
   }
   on('session.root', () => ({ value: '/p' }))
@@ -52,7 +53,9 @@ const world = (on: On) => {
     return { value: undefined }
   })
   on('tool.call', (_, e) => {
-    state.eseguiti.push((e as unknown as { command: string }).command)
+    const i = e as unknown as { command: string; timeout?: number }
+    state.eseguiti.push(i.command)
+    state.input.push({ command: i.command, timeout: i.timeout })
     return { result: 'ok', text: 'ok' } as never
   })
   return state
@@ -85,16 +88,46 @@ test('attiva con {}: default generici, rifiuti con motivo', async ($, on) => {
   s.files.set(CONFIG, '{}')
   expect(await esito($, 'npm test', { run_in_background: true })).toContain('primo piano')
   expect(await esito($, 'cargo test')).toBe(undefined)
-  expect(await esito($, 'cargo build', {})).toContain('timeout assente')
+  expect(await esito($, 'cargo build', {})).toBe(undefined)
   expect(await esito($, 'npm test && cargo test')).toContain('Bash separati')
   expect(await esito($, 'npm install', { run_in_background: true })).toBe(undefined)
-  expect(s.eseguiti).toEqual(['cargo test', 'npm install'])
+  expect(s.eseguiti).toEqual(['cargo test', 'cargo build', 'npm install'])
 })
 
 test('il motivo nomina la mod', async ($, on) => {
   const s = world(on)
   s.files.set(CONFIG, '{}')
-  expect(await esito($, 'pytest', {})).toContain('no-suite-background')
+  expect(await esito($, 'pytest', { run_in_background: true })).toContain('no-suite-background')
+})
+
+test('timeout assente o basso: il comando passa con timeout 600000; non pesante intatto', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, '{}')
+  expect(await esito($, 'pytest tests', {})).toBe(undefined)
+  expect(await esito($, 'pytest tests', { timeout: 300000 })).toBe(undefined)
+  expect(await esito($, 'pytest tests', { timeout: 600000 })).toBe(undefined)
+  expect(await esito($, 'ls', {})).toBe(undefined)
+  expect(s.input.map(i => i.timeout)).toEqual([600000, 600000, 600000, undefined])
+  expect(s.eseguiti).toEqual(['pytest tests', 'pytest tests', 'pytest tests', 'ls'])
+})
+
+test('riassunto acceso: pytest con -q --tb=line; spento: intatto', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, '{"riassunto": true}')
+  expect(await esito($, 'pytest tests', {})).toBe(undefined)
+  s.files.set(CONFIG, '{}')
+  expect(await esito($, 'pytest tests', {})).toBe(undefined)
+  expect(s.eseguiti).toEqual(['pytest -q --tb=line tests', 'pytest tests'])
+  expect(s.input.map(i => i.timeout)).toEqual([600000, 600000])
+})
+
+test('albero occupato: rifiuto anche con timeout da correggere', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, '{}')
+  s.cwd = '/w/a'
+  s.procs = [{ pid: 4242, ppid: 1, etime: '02:05', cwd: '/w/a', cmd: '/x/.venv/bin/python -m pytest tests/render -q' }]
+  expect(await esito($, 'pytest tests', {})).toContain('4242')
+  expect(s.eseguiti).toEqual([])
 })
 
 const P1 = (cwd = '/w/a'): Proc => ({ pid: 4242, ppid: 1, etime: '02:05', cwd, cmd: '/x/.venv/bin/python -m pytest tests/render -q' })

@@ -1,6 +1,6 @@
 {
   "name": "no-suite-background",
-  "version": "0.1.0",
-  "description": "Suite e build solo in primo piano con timeout 600000, una per Bash: niente agenti fermi ad aspettare una notifica che non arriva. Attiva nei progetti con .claude/no-suite-background.json.",
+  "version": "0.2.0",
+  "description": "Suite e build solo in primo piano, una per Bash, con timeout 600000 impostato da sola: niente agenti fermi ad aspettare una notifica che non arriva. Attiva nei progetti con .claude/no-suite-background.json.",
   "author": { "name": "Indji" }
 }
