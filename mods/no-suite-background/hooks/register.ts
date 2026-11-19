@@ -1,10 +1,11 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { configurazione, decidi, dirComando, leggiPs, occupanti, pulisci, quantiPesanti } from './logica'
+import { configurazione, correggi, decidi, dirComando, leggiPs, occupanti, pulisci, quantiPesanti } from './logica'
 import type { Config, Processo } from './logica'
 
 // Suite e build (comandi pesanti) solo in primo piano, con timeout 600000, uno per Bash: in background, o in primo
 // piano col timeout predefinito di 120 s (che l'harness sposta in background da solo), l'agente chiude il turno ad
-// aspettare una notifica che non lo sveglia. Rifiuta anche un comando pesante se ne gira già uno nello stesso albero
+// aspettare una notifica che non lo sveglia. Rifiuta il background e più comandi pesanti in un Bash; il timeout
+// assente o basso lo corregge (next con l'input riscritto, l'updatedInput delle mod), con `riassunto` anche pytest. Rifiuta anche un comando pesante se ne gira già uno nello stesso albero
 // git o se sulla macchina ce ne sono già maxSullaMacchina. Port di pokefootleague/.claude/hooks/no-suite-background.py.
 // Attiva solo nei progetti con .claude/no-suite-background.json (anche `{}`): vedi README.
 
@@ -81,6 +82,7 @@ export const register: Register = on => {
       }
       if (msg) return { deny: `${$.plugin.name}: ${msg}` }
     }
-    return next(e)
+    const modifica = correggi(e, cfg)
+    return next(modifica ? { ...e, ...modifica } : e)
   })
 }

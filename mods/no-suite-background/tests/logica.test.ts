@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { configurazione, decidi, dirComando, etaLeggibile, etaSecondi, occupanti, parti, principale, quantiPesanti } from '../hooks/logica'
+import { configurazione, correggi, decidi, dirComando, etaLeggibile, etaSecondi, occupanti, parti, principale, quantiPesanti } from '../hooks/logica'
 import type { Processo } from '../hooks/logica'
 
 // La configurazione di pokefootleague: i casi qui sotto sono quelli di test_no_suite_background.sh.
@@ -15,9 +15,11 @@ const bash = (command: string, bg: boolean, timeout?: number) =>
 // prova: timeout 600000, esito 0 = passa (undefined), 2 = rifiuto.
 const prova = (atteso: 0 | 2, bg: 0 | 1, cmd: string) =>
   expect([cmd, decidi(bash(cmd, bg === 1, 600000), POKE) === undefined ? 0 : 2]).toEqual([cmd, atteso])
+// Esito: 0 = passa intatto, 1 = passa con timeout corretto, 2 = rifiuto.
+const esito = (i: ReturnType<typeof bash>, cfg = POKE) => (decidi(i, cfg) !== undefined ? 2 : correggi(i, cfg) ? 1 : 0)
 // provat: in primo piano, timeout dato o assente ('-').
-const provat = (atteso: 0 | 2, t: number | '-', cmd: string) =>
-  expect([cmd, decidi(bash(cmd, false, t === '-' ? undefined : t), POKE) === undefined ? 0 : 2]).toEqual([cmd, atteso])
+const provat = (atteso: 0 | 1 | 2, t: number | '-', cmd: string) =>
+  expect([cmd, esito(bash(cmd, false, t === '-' ? undefined : t))]).toEqual([cmd, atteso])
 
 test('parità: background (prova)', () => {
   prova(0, 0, 'tools/suite.sh --nome x --attendi tests/render -q')
@@ -34,16 +36,17 @@ test('parità: background (prova)', () => {
 })
 
 test('parità: timeout in primo piano (provat)', () => {
-  provat(2, '-', '.venv/bin/python -m pytest tests/live -q -n 4')
-  provat(2, 120000, 'cd wt && sed -i "" s/a/b/ x.py && .venv/bin/python -m pytest tests/live -q')
-  provat(2, '-', 'tools/suite.sh --attendi --nome x tests/render -q')
+  // 0.2.0: il timeout basso o assente non si rifiuta più, si corregge.
+  provat(1, '-', '.venv/bin/python -m pytest tests/live -q -n 4')
+  provat(1, 120000, 'cd wt && sed -i "" s/a/b/ x.py && .venv/bin/python -m pytest tests/live -q')
+  provat(1, '-', 'tools/suite.sh --attendi --nome x tests/render -q')
   provat(0, 600000, '.venv/bin/python -m pytest tests/live -q -n 4')
   provat(0, '-', 'grep -n pytest tests/conftest.py')
   provat(0, '-', 'ls tests')
   provat(0, '-', 'pgrep -fl "python -m pytest|suite.sh" | cut -c1-160')
   provat(0, '-', 'pgrep -fl "python -m pytest"')
   provat(0, '-', 'pkill -f "pytest tests/live -q"')
-  provat(2, '-', 'sleep 5\n.venv/bin/python -m pytest -q')
+  provat(1, '-', 'sleep 5\n.venv/bin/python -m pytest -q')
 })
 
 test('parità: un solo comando pesante per Bash', () => {
@@ -54,13 +57,66 @@ test('parità: un solo comando pesante per Bash', () => {
 
 test('motivi: dicono cosa fare', () => {
   expect(decidi(bash('pytest -q', true, 600000), POKE)).toContain('primo piano')
-  expect(decidi(bash('pytest -q', false), POKE)).toContain('timeout assente')
-  expect(decidi(bash('pytest -q', false, 120000), POKE)).toContain('600000')
   expect(decidi(bash('pytest a && pytest b', false, 600000), POKE)).toContain('Bash separati')
 })
 
-test('timeout non numerico vale assente', () => {
-  expect(decidi({ command: 'pytest', timeout: 'x' as never }, POKE)).toContain('timeout assente')
+test('timeout: assente, basso, 300000, non numerico -> 600000; già 600000 o oltre -> intatto', () => {
+  expect(correggi(bash('pytest -q', false), POKE)).toEqual({ timeout: 600000 })
+  expect(correggi(bash('pytest -q', false, 120000), POKE)).toEqual({ timeout: 600000 })
+  expect(correggi(bash('pytest -q', false, 300000), POKE)).toEqual({ timeout: 600000 })
+  expect(correggi({ command: 'pytest -q', timeout: 'x' as never }, POKE)).toEqual({ timeout: 600000 })
+  expect(correggi(bash('pytest -q', false, 600000), POKE)).toBe(undefined)
+  expect(decidi(bash('pytest -q', false), POKE)).toBe(undefined)
+  expect(decidi(bash('pytest -q', false, 120000), POKE)).toBe(undefined)
+})
+
+test('correggi: comando non pesante, background e più pesanti non si toccano', () => {
+  expect(correggi(bash('ls tests', false), POKE)).toBe(undefined)
+  expect(correggi({ command: 3 }, POKE)).toBe(undefined)
+  expect(correggi(bash('pytest -q', true), POKE)).toBe(undefined)
+  expect(correggi(bash('pytest a && pytest b', false), POKE)).toBe(undefined)
+})
+
+const RIA = configurazione(JSON.stringify({ comandi: ['pytest', 'py.test', 'tools/suite.sh'], riassunto: true }))!
+const rias = (cmd: string, cfg = RIA) => correggi(bash(cmd, false, 600000), cfg)?.command
+
+test('riassunto: spento di default, acceso aggiunge -q --tb=line dopo pytest', () => {
+  expect(POKE.riassunto).toBe(false)
+  expect(RIA.riassunto).toBe(true)
+  expect(configurazione('{"riassunto": "si"}')!.riassunto).toBe(false)
+  expect(rias('pytest tests/a', POKE)).toBe(undefined)
+  expect(rias('pytest tests/a')).toBe('pytest -q --tb=line tests/a')
+  expect(rias('pytest')).toBe('pytest -q --tb=line')
+  expect(rias('.venv/bin/python -m pytest tests/live -n 4')).toBe('.venv/bin/python -m pytest -q --tb=line tests/live -n 4')
+  expect(rias('cd wt && uv run pytest -x')).toBe('cd wt && uv run pytest -q --tb=line -x')
+  expect(rias('bash -c "pytest tests"')).toBe('bash -c "pytest -q --tb=line tests"')
+  expect(rias('py.test tests')).toBe('py.test -q --tb=line tests')
+  expect(rias('/x/bin/pytest tests')).toBe('/x/bin/pytest -q --tb=line tests')
+})
+
+test('riassunto: con timeout basso corregge entrambi', () => {
+  expect(correggi(bash('pytest tests', false), RIA)).toEqual({ timeout: 600000, command: 'pytest -q --tb=line tests' })
+})
+
+test('riassunto: -q, --quiet, -v, --verbose, -xq presenti -> intatto; --tb presente -> solo -q', () => {
+  for (const c of ['pytest -q tests', 'pytest --quiet', 'pytest -qq', 'pytest -xq', 'pytest -v', 'pytest -vv tests', 'pytest --verbose'])
+    expect([c, rias(c)]).toEqual([c, undefined])
+  expect(rias('pytest --tb=short tests')).toBe('pytest -q --tb=short tests')
+  expect(rias('pytest --tb short tests')).toBe('pytest -q --tb short tests')
+  expect(rias('pytest -k "q" tests')).toBe('pytest -q --tb=line -k "q" tests')
+})
+
+test('riassunto: altri comandi pesanti, pytest nominato più volte, nessuna pipe aggiunta', () => {
+  expect(rias('tools/suite.sh tests')).toBe(undefined)
+  expect(rias('"pytest" tests')).toBe(undefined)
+  expect(rias("'pytest' tests")).toBe(undefined)
+  expect(rias("bash -c 'pytest tests'")).toBe("bash -c 'pytest -q --tb=line tests'")
+  expect(rias('pytest --verbosity=2 tests')).toBe(undefined)
+  expect(rias('pytest -p pytest-xdist tests')).toBe('pytest -q --tb=line -p pytest-xdist tests')
+  expect(rias('grep -n pytest conftest.py && pytest tests')).toBe(undefined)
+  expect(rias('echo pytest; tools/suite.sh')).toBe(undefined)
+  expect(rias('pytest tests 2>&1 | tail -5')).toBe('pytest -q --tb=line tests 2>&1 | tail -5')
+  expect(rias('pytest tests')).not.toContain('|')
 })
 
 test('parti: virgolette, separatori, a capo, virgolette non chiuse', () => {
@@ -92,8 +148,8 @@ test('configurazione: assente, non valida, aggiungi, valori', () => {
   const c = configurazione(JSON.stringify({ aggiungi: ['make check'], timeoutMinimo: 300000, maxSullaMacchina: 0, controlloProcessi: false }))!
   expect([quantiPesanti('make check', c), quantiPesanti('pytest', c), quantiPesanti('make', c)]).toEqual([1, 1, 0])
   expect([c.timeoutMinimo, c.maxSullaMacchina, c.controlloProcessi]).toEqual([300000, 0, false])
-  expect(decidi(bash('make check', false, 200000), c)).toContain('300000')
-  expect(decidi(bash('make check', false, 300000), c)).toBe(undefined)
+  expect(correggi(bash('make check', false, 200000), c)).toEqual({ timeout: 300000 })
+  expect(correggi(bash('make check', false, 300000), c)).toBe(undefined)
   // Oltre il massimo del Bash (600000) non si potrebbe obbedire: si tiene 600000.
   expect(configurazione(JSON.stringify({ timeoutMinimo: 900000 }))!.timeoutMinimo).toBe(600000)
   const solo = configurazione(JSON.stringify({ comandi: ['make check'] }))!

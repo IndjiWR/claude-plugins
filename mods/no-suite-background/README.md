@@ -11,9 +11,17 @@ Per un comando pesante, in ogni sessione, subagent e teammate del progetto, la m
 
 1. con `run_in_background`;
 2. con più di un comando pesante nello stesso Bash (`pytest a && pytest b`);
-3. con `timeout` assente o sotto `timeoutMinimo`;
-4. se un comando pesante gira già nello stesso albero git (PID, età, albero e comando nel motivo), o se sulla macchina
+3. se un comando pesante gira già nello stesso albero git (PID, età, albero e comando nel motivo), o se sulla macchina
    ne girano già `maxSullaMacchina`. Un errore nella lettura dei processi (`ps`, `lsof`, `git`) non blocca mai.
+
+Con `timeout` assente, non numerico o sotto `timeoutMinimo` non rifiuta più (dalla 0.2.0): riscrive l'input del Bash
+con `timeout` = `timeoutMinimo` e lo lascia passare, senza far perdere un turno all'agente.
+
+Con `riassunto: true`, se l'unico comando pesante è pytest (`pytest`, `py.test`, `python -m pytest`, anche dietro
+`uv run`, `cd x &&` o `bash -c`) senza `-q`/`--quiet`/`-v`/`--verbose`/`--verbosity` sulla riga (anche combinati, `-xq`; `addopts` di
+`pytest.ini` non è letto), aggiunge
+`-q --tb=line` subito dopo `pytest` (solo `-q` se c'è già `--tb`). Nessuna pipe aggiunta: il codice d'uscita resta
+quello di pytest. Se la parola `pytest` compare più volte nel comando (`grep pytest x && pytest`) non tocca niente.
 
 I comandi si leggono rispettando le virgolette: `pgrep -f "python -m pytest"` o `grep pytest conftest.py` non sono
 comandi pesanti; `cd wt && pytest`, `CI=1 npm test`, `uv run pytest`, `python -m pytest`, `npx vitest`,
@@ -35,9 +43,10 @@ Campi, tutti facoltativi:
 | `comandi` | `pytest`, `py.test`, `npm test`, `npm run test`, `vitest`, `cargo test`, `cargo build` | Sostituisce l'elenco dei comandi pesanti |
 | `aggiungi` | — | Comandi pesanti in più rispetto a `comandi` |
 | `nonContati` | — | Comandi esclusi dal tetto sulla macchina (restano nel controllo dello stesso albero) |
-| `timeoutMinimo` | `600000` | Timeout minimo in ms per un comando pesante in primo piano (al massimo 600000, il tetto del Bash) |
+| `timeoutMinimo` | `600000` | Timeout a cui la mod porta un comando pesante in primo piano (al massimo 600000, il tetto del Bash) |
 | `maxSullaMacchina` | `3` | Comandi pesanti già in corso sulla macchina oltre i quali si rifiuta; `0` spegne il tetto |
-| `controlloProcessi` | `true` | `false` spegne il punto 4 (niente `ps`) |
+| `controlloProcessi` | `true` | `false` spegne il punto 3 (niente `ps`) |
+| `riassunto` | `false` | `true` aggiunge `-q --tb=line` a pytest (vedi sopra) |
 
 Un comando dell'elenco è il nome del programma (confrontato sul nome base: `tools/suite.sh` vale anche per
 `./tools/suite.sh` e `wt/tools/suite.sh`) seguito dalle parole che devono seguirlo (`cargo test`). `python -m pkg.mod`
