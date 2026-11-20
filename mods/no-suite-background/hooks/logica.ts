@@ -12,6 +12,7 @@ export type Config = {
   maxSullaMacchina: number
   controlloProcessi: boolean
   riassunto: boolean
+  attesaMassima: number
 }
 
 export type Processo = { pid: number; ppid: number; eta: number; cmd: string; albero?: string | null; cwd?: string | null }
@@ -194,6 +195,7 @@ export function configurazione(testo: string | undefined): Config | null {
     maxSullaMacchina: mx,
     controlloProcessi: typeof o.controlloProcessi === 'boolean' ? o.controlloProcessi : true,
     riassunto: o.riassunto === true,
+    attesaMassima: typeof o.attesaMassima === 'number' && o.attesaMassima >= 0 ? Math.floor(o.attesaMassima) : 1200,
   }
 }
 
@@ -312,7 +314,9 @@ export function pulisci(p: string): string {
 
 /** Il motivo del rifiuto se un comando pesante occupa già lo stesso albero, o il tetto sulla macchina è pieno.
  * `procs` ha l'albero già risolto; si contano solo i processi radice (né worker né figli di un pesante). */
-export function occupanti(procs: readonly Processo[], mio: string | null, cfg: Config, genitori?: Map<number, number>): string | undefined {
+export function occupanti(
+  procs: readonly Processo[], mio: string | null, cfg: Config, genitori?: Map<number, number>, prenotati: readonly Processo[] = [],
+): string | undefined {
   const pesanti = procs.filter(p => principale(p.cmd, cfg))
   const pids = new Set(pesanti.map(p => p.pid))
   const haAntenatoPesante = (p: Processo) => {
@@ -325,10 +329,11 @@ export function occupanti(procs: readonly Processo[], mio: string | null, cfg: C
     }
     return false
   }
-  const radici = pesanti.filter(p => !haAntenatoPesante(p))
+  const radici = [...pesanti.filter(p => !haAntenatoPesante(p)), ...prenotati]
   const desc = (p: Processo, motivo: string) => {
     const c = p.cmd.length <= 80 ? p.cmd : `${p.cmd.slice(0, 77)}...`
-    return `${motivo}: occupa il posto il PID ${p.pid} (in corso da ${etaLeggibile(Math.trunc(p.eta))}, ` +
+    const chi = p.pid > 0 ? `il PID ${p.pid}` : 'un comando pesante in coda o appena partito'
+    return `${motivo}: occupa il posto ${chi} (da ${etaLeggibile(Math.trunc(p.eta))}, ` +
       `albero ${p.albero || 'sconosciuto'}, comando \`${c}\`). Aspetta che finisca o fermalo se è un tuo doppione.`
   }
   if (mio) {
@@ -341,4 +346,59 @@ export function occupanti(procs: readonly Processo[], mio: string | null, cfg: C
     return desc(vecchio, `Sulla macchina girano già ${contati.length} comandi pesanti (massimo ${cfg.maxSullaMacchina})`)
   }
   return undefined
+}
+
+/** Una prenotazione della coda, da un file di `~/.claude/no-suite-background/coda/`. `nome` ordina la coda
+ * (istante d'ingresso a 13 cifre, poi un id); `agg` è l'ultimo rinfresco (mtime del file). */
+export type Prenotazione = { nome: string; stato: 'attesa' | 'partito'; t: number; agg: number; albero: string | null; cmd: string }
+
+/** Oltre questa età una prenotazione non conta: un'attesa non rinfrescata (sessione morta), un partito già in `ps`. */
+export const SCADENZA_PRENOTAZIONE = 30_000
+
+/** Le prenotazioni degli altri che occupano un posto per `mio`, come processi senza PID (`eta` in secondi):
+ * le attese vive arrivate prima (FIFO) e i partiti recenti che `ps` non mostra ancora (nessuna radice nello stesso
+ * albero con un'età compatibile). */
+export function prenotati(lista: readonly Prenotazione[], mio: string, procs: readonly Processo[], ora: number): Processo[] {
+  return lista.filter(p => {
+    if (p.nome === mio) return false
+    if (p.stato === 'attesa') return p.nome < mio && ora - p.agg <= SCADENZA_PRENOTAZIONE
+    const eta = (ora - p.t) / 1000
+    if (ora - p.t > SCADENZA_PRENOTAZIONE) return false
+    return !procs.some(q => p.albero !== null && q.albero === p.albero && q.eta <= eta + 5)
+  }).map(p => ({ pid: 0, ppid: 0, eta: Math.max(0, (ora - p.t) / 1000), cmd: p.cmd, albero: p.albero }))
+}
+
+const FILTRI = new Set(['tail', 'head', 'grep', 'wc', 'sort', 'uniq', 'cut', 'true', 'echo'])
+const VIETATI = new Set(['sudo', 'xargs', 'eval', 'exec', 'source', '.', ...SHELL])
+const OPERATORI = new Set(['&&', '||', ';', '|'])
+
+/** Il comando è un solo comando pesante, al più con `cd <dir>` e filtri in pipe (`tail`, `grep`…, anche `true` ed `echo`), uniti da
+ * `&&`, `||`, `;`, `|`: niente sostituzioni, redirezioni (salvo `2>&1`), background, sottoshell, a capo. Solo su
+ * questi, riscritti dalla mod, il hook `tool.judge` risponde allow al posto del classificatore dell'auto mode. */
+export function semplice(cmd: string, cfg: Config): boolean {
+  const s = cmd.replace(/(^|\s)2>&1(?=\s|$)/g, ' ')
+  if (/[<>`\n\\]|\$\(/.test(s)) return false
+  const tok = tokenizza(s, true)
+  if (tok === null) return false
+  let pesanti = 0
+  let parte: string[] = []
+  const chiudi = (): boolean => {
+    const t = parte
+    parte = []
+    if (t.length === 0) return false
+    const b = base(t[0] ?? '')
+    if (b === 'cd') return t.length <= 2
+    if (FILTRI.has(b)) return true
+    if (VIETATI.has(b)) return false
+    const n = normalizza(t)
+    if (VIETATI.has(base(n[0] ?? '')) || !cfg.voci.some(v => corrisponde(n, v))) return false
+    pesanti++
+    return true
+  }
+  for (const t of tok) {
+    if (t !== '' && [...t].every(c => PUNT.includes(c))) {
+      if (!OPERATORI.has(t) || !chiudi()) return false
+    } else parte.push(t)
+  }
+  return chiudi() && pesanti === 1
 }

@@ -1,6 +1,7 @@
 # no-suite-background
 
-Suite di test e build (i **comandi pesanti**) solo in primo piano, con `timeout` 600000, uno per Bash.
+Suite di test e build (i **comandi pesanti**) solo in primo piano, con `timeout` 600000, uno per Bash, in coda se la
+macchina o l'albero sono occupati.
 
 Un comando pesante finito in background lascia l'agente fermo: chiude il turno ad aspettare una notifica di fine
 comando che non sveglia un subagent o un teammate inattivo. Succede anche senza `run_in_background`: in primo piano
@@ -10,12 +11,28 @@ Bash possono superare insieme i 10 minuti.
 Per un comando pesante, in ogni sessione, subagent e teammate del progetto, la mod rifiuta il Bash con il motivo:
 
 1. con `run_in_background`;
-2. con più di un comando pesante nello stesso Bash (`pytest a && pytest b`);
-3. se un comando pesante gira già nello stesso albero git (PID, età, albero e comando nel motivo), o se sulla macchina
-   ne girano già `maxSullaMacchina`. Un errore nella lettura dei processi (`ps`, `lsof`, `git`) non blocca mai.
+2. con più di un comando pesante nello stesso Bash (`pytest a && pytest b`).
+
+Se un comando pesante gira già nello stesso albero git, o sulla macchina ne girano già `maxSullaMacchina`, il Bash
+**aspetta il suo turno** (dalla 0.3.0) invece di essere rifiutato: la mod ricontrolla ogni 5 secondi e lo lascia
+partire appena c'è posto, senza turni né `sleep` a carico dell'agente. La coda è FIFO e vale tra sessioni, subagent e
+teammate: ogni comando in attesa lascia una prenotazione in `~/.claude/no-suite-background/coda/` (tolta a comando
+finito; un'attesa non rinfrescata da 30 s, di una sessione morta, non conta più). Dopo `attesaMassima` secondi senza
+posto il Bash è rifiutato con il motivo (chi occupa il posto: PID, età, albero, comando) e il tempo atteso.
+Un errore nella lettura dei processi (`ps`, `lsof`, `git`) o dei file della coda non blocca mai.
 
 Con `timeout` assente, non numerico o sotto `timeoutMinimo` non rifiuta più (dalla 0.2.0): riscrive l'input del Bash
 con `timeout` = `timeoutMinimo` e lo lascia passare, senza far perdere un turno all'agente.
+
+### Auto mode
+
+In auto mode il classificatore non giudica un Bash il cui input è stato cambiato da un hook: lo nega con «a hook
+changed this call's input» (anche se cambia solo `timeout`) e l'agente deve rilanciarlo. Dalla 0.3.0, se il comando
+riscritto dalla mod è **semplice** (un solo comando pesante, al più con `cd <dir>`, variabili d'ambiente, filtri in
+pipe `tail`/`head`/`grep`/`wc`/`sort`/`uniq`/`cut`, `true`, `echo`, uniti da `&&`, `||`, `;`, `|`; niente `$(…)`,
+backtick, redirezioni salvo `2>&1`, `&`, sottoshell, `sudo`, `xargs`, `bash -c`), la mod risponde `allow` al posto del
+classificatore (hook `tool.judge`, solo quando il verdetto sotto è «nessun verdetto»: un `deny` resta). Un comando non
+semplice resta al classificatore: il motore chiede all'agente di rilanciarlo con l'input già corretto.
 
 Con `riassunto: true`, se l'unico comando pesante è pytest (`pytest`, `py.test`, `python -m pytest`, anche dietro
 `uv run`, `cd x &&` o `bash -c`) senza `-q`/`--quiet`/`-v`/`--verbose`/`--verbosity` sulla riga (anche combinati, `-xq`; `addopts` di
@@ -44,8 +61,9 @@ Campi, tutti facoltativi:
 | `aggiungi` | — | Comandi pesanti in più rispetto a `comandi` |
 | `nonContati` | — | Comandi esclusi dal tetto sulla macchina (restano nel controllo dello stesso albero) |
 | `timeoutMinimo` | `600000` | Timeout a cui la mod porta un comando pesante in primo piano (al massimo 600000, il tetto del Bash) |
-| `maxSullaMacchina` | `3` | Comandi pesanti già in corso sulla macchina oltre i quali si rifiuta; `0` spegne il tetto |
-| `controlloProcessi` | `true` | `false` spegne il punto 3 (niente `ps`) |
+| `maxSullaMacchina` | `3` | Comandi pesanti già in corso sulla macchina oltre i quali si aspetta in coda; `0` spegne il tetto |
+| `attesaMassima` | `1200` | Secondi di attesa in coda prima del rifiuto; `0` rifiuta subito come la 0.2.0 |
+| `controlloProcessi` | `true` | `false` spegne coda e controllo dei processi (niente `ps`) |
 | `riassunto` | `false` | `true` aggiunge `-q --tb=line` a pytest (vedi sopra) |
 
 Un comando dell'elenco è il nome del programma (confrontato sul nome base: `tools/suite.sh` vale anche per

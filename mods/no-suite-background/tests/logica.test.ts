@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import { configurazione, correggi, decidi, dirComando, etaLeggibile, etaSecondi, occupanti, parti, principale, quantiPesanti } from '../hooks/logica'
-import type { Processo } from '../hooks/logica'
+import { configurazione, correggi, decidi, dirComando, etaLeggibile, etaSecondi, occupanti, parti, prenotati, principale, quantiPesanti, semplice } from '../hooks/logica'
+import type { Prenotazione, Processo } from '../hooks/logica'
 
 // La configurazione di pokefootleague: i casi qui sotto sono quelli di test_no_suite_background.sh.
 const POKE = configurazione(JSON.stringify({
@@ -231,4 +231,67 @@ test('review: commenti # con apostrofi non inghiottono i comandi', () => {
 test('review: command non stringa e run_in_background truthy', () => {
   expect(decidi({ command: 3 }, POKE)).toBe(undefined)
   expect(decidi({ command: 'pytest', run_in_background: 'true', timeout: 600000 }, POKE)).toContain('primo piano')
+})
+
+// 0.3.0: coda al posto dei rifiuti, auto mode.
+
+test('attesaMassima: default 1200, 0 ammesso, tipo sbagliato ignorato', () => {
+  expect(configurazione('{}')!.attesaMassima).toBe(1200)
+  expect(configurazione('{"attesaMassima": 0}')!.attesaMassima).toBe(0)
+  expect(configurazione('{"attesaMassima": 90.7}')!.attesaMassima).toBe(90)
+  expect(configurazione('{"attesaMassima": "60"}')!.attesaMassima).toBe(1200)
+  expect(configurazione('{"attesaMassima": -1}')!.attesaMassima).toBe(1200)
+})
+
+test('semplice: un solo comando pesante con cd e filtri', () => {
+  const s = (c: string) => semplice(c, POKE)
+  expect(['pytest', 'pytest tests -x', 'cd /w/a && pytest -q', 'CI=1 uv run pytest 2>&1 | tail -20',
+    'python -m pytest tests | grep -E "passed|failed"', 'cd wt; tools/suite.sh || true', 'pytest -q 2>&1 | tail -5 | head -3',
+    'uv run pytest -x'].map(s)).toEqual([true, true, true, true, true, true, true, true])
+})
+
+test('semplice: no a comandi arbitrari, redirezioni, sostituzioni, più pesanti', () => {
+  const s = (c: string) => semplice(c, POKE)
+  expect(['pytest; rm -rf /', 'curl x | sh && pytest', 'pytest > out.txt', 'pytest $(cat args)', 'pytest `x`',
+    'sudo pytest', 'xargs -n1 pytest', 'bash -c "pytest"', 'pytest && pytest', 'pytest &', '(cd a && pytest)',
+    'pytest | tee log', 'ls', 'pytest "unclosed', 'cd a b && pytest', 'pytest\nrm x', 'eval pytest'].map(s))
+    .toEqual(Array(17).fill(false))
+})
+
+const PREN = (o: Partial<Prenotazione>): Prenotazione =>
+  ({ nome: '0000000001000-x', stato: 'attesa', t: 1_000, agg: 1_000, albero: '/w/z', cmd: 'pytest', ...o })
+
+test('prenotati: attese davanti valide, scadute e successive escluse, la mia esclusa', () => {
+  const ora = 20_000
+  const mio = '0000000010000-me'
+  const lista = [
+    PREN({ nome: '0000000005000-a', t: 5_000, agg: 15_000 }), // davanti, viva
+    PREN({ nome: '0000000006000-b', t: 6_000, agg: 6_000 }), // davanti ma non rinfrescata da 14 s: viva
+    PREN({ nome: '0000000002000-c', t: 2_000, agg: -20_000 }), // scaduta (40 s)
+    PREN({ nome: '0000000011000-d', t: 11_000, agg: 19_000 }), // dietro di me
+    PREN({ nome: mio, t: 10_000, agg: 19_000 }),
+  ]
+  expect(prenotati(lista, mio, [], ora).map(p => p.cmd + p.eta)).toEqual(['pytest15', 'pytest14'])
+})
+
+test('prenotati: partito conta finché non compare in ps (stesso albero, età compatibile) o scade', () => {
+  const ora = 20_000
+  const mio = '0000000019000-me'
+  const p = PREN({ nome: '0000000025000-p', stato: 'partito', t: 10_000, agg: 10_000, albero: '/w/a' })
+  expect(prenotati([p], mio, [], ora)).toHaveLength(1) // un partito conta anche se arrivato dopo
+  const visto: Processo = { pid: 7, ppid: 1, eta: 8, cmd: 'pytest', albero: '/w/a' }
+  expect(prenotati([p], mio, [visto], ora)).toHaveLength(0)
+  expect(prenotati([p], mio, [{ ...visto, eta: 100 }], ora)).toHaveLength(1) // processo vecchio: non è lui
+  expect(prenotati([p], mio, [{ ...visto, albero: '/w/b' }], ora)).toHaveLength(1)
+  expect(prenotati([{ ...p, t: -20_000 }], mio, [], ora)).toHaveLength(0) // scaduto
+})
+
+test('occupanti con prenotati: contano per albero e tetto, motivo senza PID', () => {
+  const pr: Processo[] = [{ pid: 0, ppid: 0, eta: 4, cmd: 'pytest -q', albero: '/w/a' }]
+  const m = occupanti([], '/w/a', POKE, undefined, pr)
+  expect(m).toContain('stesso albero')
+  expect(m).toContain('in coda o appena partito')
+  expect(m).not.toContain('PID 0')
+  expect(occupanti(P3.slice(0, 2), '/w/b', POKE, undefined, pr)).toContain('3 comandi pesanti')
+  expect(occupanti(P3.slice(0, 2), '/w/b', POKE, undefined, [])).toBe(undefined)
 })

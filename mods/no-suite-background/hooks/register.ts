@@ -1,12 +1,15 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { configurazione, correggi, decidi, dirComando, leggiPs, occupanti, pulisci, quantiPesanti } from './logica'
-import type { Config, Processo } from './logica'
+import { configurazione, correggi, decidi, dirComando, etaLeggibile, leggiPs, occupanti, prenotati, pulisci, quantiPesanti, semplice } from './logica'
+import type { Config, Prenotazione, Processo } from './logica'
 
 // Suite e build (comandi pesanti) solo in primo piano, con timeout 600000, uno per Bash: in background, o in primo
 // piano col timeout predefinito di 120 s (che l'harness sposta in background da solo), l'agente chiude il turno ad
 // aspettare una notifica che non lo sveglia. Rifiuta il background e più comandi pesanti in un Bash; il timeout
-// assente o basso lo corregge (next con l'input riscritto, l'updatedInput delle mod), con `riassunto` anche pytest. Rifiuta anche un comando pesante se ne gira già uno nello stesso albero
-// git o se sulla macchina ce ne sono già maxSullaMacchina. Port di pokefootleague/.claude/hooks/no-suite-background.py.
+// assente o basso lo corregge (next con l'input riscritto, l'updatedInput delle mod), con `riassunto` anche pytest.
+// Se un comando pesante gira già nello stesso albero git, o sulla macchina ce ne sono già maxSullaMacchina, il comando
+// aspetta il suo turno (coda FIFO su file, al più attesaMassima secondi) invece di essere rifiutato. In auto mode il
+// classificatore non giudica un input riscritto: per un comando pesante semplice la mod risponde allow (tool.judge).
+// Port di pokefootleague/.claude/hooks/no-suite-background.py.
 // Attiva solo nei progetti con .claude/no-suite-background.json (anche `{}`): vedi README.
 
 const FILE = '.claude/no-suite-background.json'
@@ -58,8 +61,54 @@ async function processi($: EngineInterface, cfg: Config) {
   return { genitori, procs: out }
 }
 
+const SONNO_S = 5 // un giro della coda
+const VECCHIO = 10 * 60_000 // un file della coda più vecchio si toglie
+
+async function togli($: EngineInterface, file: string) {
+  try {
+    await $.process.run(['rm', '-f', file], { timeoutMs: 10000 })
+  } catch {
+    // resta: scade da solo
+  }
+}
+
+/** Le prenotazioni in `dir`; quelle oltre VECCHIO le toglie. Un errore vale una coda vuota. */
+async function leggiCoda($: EngineInterface, dir: string, ora: number): Promise<Prenotazione[]> {
+  const out: Prenotazione[] = []
+  let voci: Awaited<ReturnType<EngineInterface['fs']['list']>>
+  try {
+    voci = await $.fs.list(dir)
+  } catch {
+    return out
+  }
+  for (const v of voci) {
+    if (v.kind !== 'file' || !v.name.endsWith('.json')) continue
+    const file = `${dir}/${v.name}`
+    if (ora - v.mtimeMs > VECCHIO) {
+      await togli($, file)
+      continue
+    }
+    try {
+      const d = JSON.parse((await $.fs.read(file)) as string) as Record<string, unknown>
+      out.push({
+        nome: v.name.slice(0, -'.json'.length),
+        stato: d.stato === 'partito' ? 'partito' : 'attesa',
+        t: Number(d.t) || 0,
+        agg: v.mtimeMs,
+        albero: typeof d.albero === 'string' ? d.albero : null,
+        cmd: typeof d.cmd === 'string' ? d.cmd : '',
+      })
+    } catch {
+      // file a metà o sparito: non conta
+    }
+  }
+  return out
+}
+
 export const register: Register = on => {
   const avvisato = new Set<string>()
+  // tool_use_id dei Bash semplici di cui la mod ha riscritto l'input: in auto mode li lascia passare (tool.judge).
+  const riscritti = new Set<string>()
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     let cfg: Config | null
     try {
@@ -70,19 +119,74 @@ export const register: Register = on => {
     if (cfg === null) return next(e)
     const motivo = decidi(e, cfg)
     if (motivo) return { deny: `${$.plugin.name}: ${motivo}` }
-    if (cfg.controlloProcessi && typeof e.command === 'string' && quantiPesanti(e.command, cfg) > 0) {
+    const modifica = correggi(e, cfg)
+    const finale = modifica ? { ...e, ...modifica } : e
+    if (modifica && typeof e.tool_use_id === 'string' && typeof e.command === 'string' && semplice(e.command, cfg)) {
+      if (riscritti.size > 1000) riscritti.clear()
+      riscritti.add(e.tool_use_id)
+    }
+    if (!cfg.controlloProcessi || typeof e.command !== 'string' || quantiPesanti(e.command, cfg) === 0) return next(finale)
+
+    // Coda: si aspetta un posto (stesso albero libero, tetto non pieno), un giro ogni SONNO_S secondi.
+    let mio: string | null = null
+    let dir: string | null = null
+    try {
+      const home = await $.env.get('HOME').catch(() => undefined)
+      if (home) dir = `${home.replace(/\/+$/, '')}/.claude/no-suite-background/coda`
+      mio = await albero($, dirComando(e.command, await $.session.cwd(), home ?? undefined))
+    } catch {
+      // albero sconosciuto: vale solo il tetto
+    }
+    const coda = cfg.attesaMassima > 0 && dir !== null
+    const inizio = await $.clock.now()
+    const nome = `${String(inizio).padStart(13, '0')}-${e.tool_use_id ?? Math.random().toString(36).slice(2)}`
+    const file = `${dir}/${nome}.json`
+    const scrivi = async (stato: 'attesa' | 'partito', t: number) => {
+      if (!coda) return
+      try {
+        await $.fs.write(file, JSON.stringify({ stato, t, albero: mio, cmd: e.command }))
+      } catch {
+        // senza file la coda vale solo per questo processo: si va avanti col solo ps
+      }
+    }
+    await scrivi('attesa', inizio)
+    for (;;) {
       let msg: string | undefined
       try {
         const { genitori, procs } = await processi($, cfg)
-        const home = await $.env.get('HOME').catch(() => undefined)
-        const mio = await albero($, dirComando(e.command, await $.session.cwd(), home ?? undefined))
-        msg = occupanti(procs, mio, cfg, genitori)
+        const ora = await $.clock.now()
+        const altri = coda && dir !== null ? prenotati(await leggiCoda($, dir, ora), nome, procs, ora) : []
+        msg = occupanti(procs, mio, cfg, genitori, altri)
       } catch {
         msg = undefined // mai bloccare per un errore nella lettura dei processi
       }
-      if (msg) return { deny: `${$.plugin.name}: ${msg}` }
+      if (!msg) break
+      if (!coda) return { deny: `${$.plugin.name}: ${msg}` }
+      const atteso = ((await $.clock.now()) - inizio) / 1000
+      if (atteso >= cfg.attesaMassima || next.signal.aborted) {
+        await togli($, file)
+        return {
+          deny: `${$.plugin.name}: in coda da ${etaLeggibile(Math.trunc(atteso))} senza un posto ` +
+            `(attesaMassima ${cfg.attesaMassima} s). ${msg} Non aspettare con sleep: riprova più tardi o fai altro intanto.`,
+        }
+      }
+      await scrivi('attesa', inizio) // rinfresco: un'attesa ferma da 30 s è di una sessione morta
+      await $.process.run(['sleep', String(SONNO_S)], { timeoutMs: (SONNO_S + 10) * 1000 })
     }
-    const modifica = correggi(e, cfg)
-    return next(modifica ? { ...e, ...modifica } : e)
+    if (!coda) return next(finale)
+    await scrivi('partito', await $.clock.now())
+    try {
+      return await next(finale)
+    } finally {
+      await togli($, file)
+    }
+  })
+  on('tool.judge', { tool: 'Bash' }, async ($, e, next) => {
+    const r = await next(e)
+    const nostro = riscritti.delete(e.tool_use_id)
+    if (r.decision === 'ask' && nostro) {
+      return { decision: 'allow', reason: `${$.plugin.name}: comando pesante semplice, input cambiato dalla mod (timeout o riassunto)` }
+    }
+    return r
   })
 }
