@@ -37,8 +37,11 @@ verdetto sotto è `ask`, cioè nessun verdetto; un `deny` resta). Semplice vuol 
 - un solo comando pesante col nome esatto della voce (`./voce` solo per le voci con un percorso, come
   `./tools/suite.sh`), con davanti al più `CI=`, `FORCE_COLOR=`, `NO_COLOR=`, `PYTHONUNBUFFERED=`,
   `PYTHONDONTWRITEBYTECODE=`, `TERM=`, `COLUMNS=`, e i prefissi `time`, `timeout N`, `npx`, `bunx`,
-  `uv|poetry|pipenv|pdm run`, `[.venv/bin/]python[3] [-u] -m`, senza altre opzioni; tra i suoi argomenti niente `-p`
-  (salvo `-p no:…`), `-c`, `--config`, `--script-shell`;
+  `uv|poetry|pipenv|pdm run`, `[.venv/bin/]python[3] [-u] -m`, senza altre opzioni; come argomenti solo posizionali,
+  `--` e opzioni note che non caricano configurazioni o codice (`-q`, `-v`, `-x`, `-s`, `-l` anche uniti, `--lf`,
+  `--ff`, `--co`, `--release`, `--no-header`, `-k|-m|-n|-t valore`, `--tb=`, `--maxfail=`, `--durations=`,
+  `-p no:…`); per gli script con un percorso anche `--parola` senza valore, salvo nomi con config, shell, plugin, rc,
+  preload, require;
 - al più `cd <dir>` e filtri in pipe che leggono solo l'input: `tail`/`head` (`-n N`, `-N`), `wc -l`, `grep` con un
   solo motivo e opzioni di sola lettura, `echo`, `true`; uniti da `&&`, `||`, `;`, `|`;
 - niente `$`, graffe, backtick, redirezioni (salvo `2>&1`), `&`, sottoshell, a capo.

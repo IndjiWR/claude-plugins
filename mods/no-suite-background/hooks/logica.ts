@@ -397,11 +397,29 @@ function pesanteStretto(t: readonly string[], cfg: Config): boolean {
   const v = cfg.voci.find(v => v.length > 0 && r.length >= v.length && (r[0] === v[0] || (v[0]?.includes('/') && r[0] === `./${v[0]}`)) &&
     v.slice(1).every((w, k) => r[k + 1] === w))
   if (!v) return false
-  return r.slice(v.length).every((a, k, args) => {
-    if (a === '-p') return (args[k + 1] ?? '').startsWith('no:')
-    if (a.startsWith('-p') && !a.startsWith('--')) return a.startsWith('-pno:')
-    return a !== '-c' && !a.startsWith('--config') && !a.startsWith('--script-shell')
-  })
+  return argomentiNoti(r.slice(v.length), (v[0] ?? '').includes('/'))
+}
+
+// Opzioni ammesse dopo un comando pesante: solo quelle che non fanno leggere configurazioni o caricare codice.
+const FLAG = /^-[qvxsl]+$|^--(lf|ff|last-failed|failed-first|exitfirst|quiet|verbose|no-header|co|collect-only|release|no-fail-fast)$/
+const CON_VALORE = new Set(['-k', '-m', '-n', '-t'])
+const VALORE = /^--(tb|maxfail|durations)=[\w.]+$|^-n\d+$/
+
+/** Gli argomenti di un comando pesante: posizionali, `--` e le opzioni note (`FLAG`, `-k|-m|-n|-t valore`,
+ * `--tb=…`, `-p no:…`); per un comando con un percorso (uno script del progetto) anche `--parola` senza valore,
+ * salvo quelle che nominano configurazioni, shell, plugin o moduli da caricare. */
+function argomentiNoti(args: readonly string[], script: boolean): boolean {
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k] ?? ''
+    if (!a.startsWith('-') || a === '--' || FLAG.test(a) || VALORE.test(a)) continue
+    if (CON_VALORE.has(a) || (a === '-p' && (args[k + 1] ?? '').startsWith('no:'))) {
+      k++
+      continue
+    }
+    if (script && /^--[a-z][a-z-]*$/.test(a) && !/config|shell|plugin|rc|preload|require/.test(a)) continue
+    return false
+  }
+  return true
 }
 
 /** Un filtro in pipe che legge solo lo standard input e non scrive file né esegue programmi. */

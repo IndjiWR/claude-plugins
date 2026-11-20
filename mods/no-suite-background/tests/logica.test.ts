@@ -316,3 +316,17 @@ test("review: un'attesa bloccata sullo stesso albero di un occupante non conta n
   expect(occupanti(run, '/w/y', cfg, undefined, [att('/w/x'), att('/w/x')])).toBe(undefined)
   expect(occupanti(run, '/w/y', cfg, undefined, [att('/w/z'), att('/w/k')])).toContain('3 comandi pesanti')
 })
+
+test('re-review: argomenti del comando pesante a whitelist', () => {
+  const s = (c: string) => semplice(c, POKE)
+  const npm = configurazione('{}')!
+  expect(['pytest -cevil.ini', 'pytest -xpevil', 'pytest -o addopts=-pevil', 'pytest --override-ini addopts=x',
+    'pytest --rootdir=/tmp', 'tools/suite.sh --config=x', 'pytest -n auto --dist=x', 'tools/suite.sh --config x',
+    'tools/suite.sh --require x'].map(s)).toEqual(Array(9).fill(false))
+  expect(['npm test --userconfig=/tmp/x', 'cargo test --manifest-path /tmp/x/Cargo.toml', 'npm test -- --globalconfig=x']
+    .map(c => semplice(c, npm))).toEqual([false, false, false])
+  expect(['pytest -xq tests/a.py::t -k "a and not b"', 'pytest -vv --tb=short --maxfail=1 -m slow', 'pytest -n 4 --lf',
+    'pytest -p no:cacheprovider --durations=10', 'tools/suite.sh --nome martello --attendi -q'].map(s)).toEqual(Array(5).fill(true))
+  expect(['npm test', 'npm test -- -t foo', 'cargo test --release', 'cargo build --release -q'].map(c => semplice(c, npm)))
+    .toEqual([true, true, true, true])
+})
