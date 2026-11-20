@@ -7,13 +7,31 @@ const POKE = JSON.stringify({
   comandi: ['pytest', 'py.test', 'tools/suite.sh', 'python -m footmon.render.gallery'],
   nonContati: ['python -m footmon.render.gallery'],
 })
+// Come la 0.2.0: rifiuto immediato invece della coda.
+const POKE0 = JSON.stringify({ ...JSON.parse(POKE), attesaMassima: 0 })
+const CODA = '/home/u/.claude/no-suite-background/coda'
 
 type Proc = { pid: number; ppid: number; etime: string; cwd: string; cmd: string }
 
 // Il mondo sotto la mod: un progetto in /p, i file, i processi (ps, lsof, git) e il fondo di tool.call.
 const world = (on: On) => {
   mock.env(on, { HOME: '/home/u' })
+  const clock = mock.clock(on, { now: 1_000_000 })
   const state = {
+    clock,
+    mtime: new Map<string, number>(),
+    sonni: 0,
+    // Chiamato a ogni `sleep` della coda, dopo che l'orologio è andato avanti di 5 s.
+    dopoSonno: undefined as undefined | ((n: number) => void),
+    // Chiamato quando il fondo esegue un Bash: simula il processo che parte.
+    avvio: undefined as undefined | ((command: string) => void),
+    judge: [] as unknown[],
+    verdetto: 'ask' as 'ask' | 'deny' | 'allow',
+    // Come in auto mode: il fondo chiede tool.judge prima di eseguire; i verdetti finali qui.
+    verdetti: [] as string[],
+    judge$: undefined as Engine | undefined,
+    listaRotta: false,
+    ids: [] as (string | undefined)[],
     cwd: '/w/b',
     files: new Map<string, string>(),
     procs: [] as Proc[],
@@ -30,10 +48,32 @@ const world = (on: On) => {
     const t = state.files.get(e.path)
     return t === undefined ? { deny: `ENOENT ${e.path}` } : { value: t }
   })
-  on('process.run', (_, e) => {
+  on('fs.write', (_, e) => {
+    state.files.set(e.path, e.text)
+    state.mtime.set(e.path, clock.now())
+    return { value: undefined }
+  })
+  on('fs.list', (_, e) => {
+    if (state.listaRotta) return { deny: 'EACCES' } as never
+    const dir = e.path.replace(/\/+$/, '')
+    const v = [...state.files.keys()].filter(k => k.startsWith(`${dir}/`) && !k.slice(dir.length + 1).includes('/'))
+      .map(k => ({ name: k.slice(dir.length + 1), kind: 'file', size: 1, mtimeMs: state.mtime.get(k) ?? 0, isLink: false }))
+    return { value: v as never }
+  })
+  on('process.run', async (_, e) => {
     const argv = [...e.argv]
-    state.runs.push(argv)
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '' } as never })
+    if (argv[0] === 'sleep') {
+      state.sonni++
+      await clock.advance(Number(argv[1]) * 1000)
+      state.dopoSonno?.(state.sonni)
+      return ok('')
+    }
+    if (argv[0] === 'rm') {
+      for (const f of argv.slice(2)) state.files.delete(f)
+      return ok('')
+    }
+    state.runs.push(argv)
     if (argv[0] === 'ps') {
       if (state.psRotto) return { deny: 'ps: non trovato' } as never
       return ok(state.procs.map(p => `${p.pid} ${p.ppid} ${p.etime} ${p.cmd}`).join('\n') + '\n')
@@ -52,8 +92,18 @@ const world = (on: On) => {
     state.logs.push((e as unknown as { text: string }).text)
     return { value: undefined }
   })
-  on('tool.call', (_, e) => {
-    const i = e as unknown as { command: string; timeout?: number }
+  on('tool.judge', (_, e) => {
+    state.judge.push(e)
+    return { decision: state.verdetto, reason: 'Classifier unavailable - blocking for safety' } as never
+  })
+  on('tool.call', async (_, e) => {
+    const i = e as unknown as { command: string; timeout?: number; tool_use_id?: string }
+    if (state.judge$) {
+      const v = await state.judge$.tool.judge({ tool: 'Bash', input: { command: i.command, timeout: i.timeout }, tool_use_id: i.tool_use_id ?? 'x' } as never)
+      state.verdetti.push(v.decision)
+    }
+    state.ids.push(i.tool_use_id)
+    state.avvio?.(i.command)
     state.eseguiti.push(i.command)
     state.input.push({ command: i.command, timeout: i.timeout })
     return { result: 'ok', text: 'ok' } as never
@@ -123,7 +173,7 @@ test('riassunto acceso: pytest con -q --tb=line; spento: intatto', async ($, on)
 
 test('albero occupato: rifiuto anche con timeout da correggere', async ($, on) => {
   const s = world(on)
-  s.files.set(CONFIG, '{}')
+  s.files.set(CONFIG, '{"attesaMassima": 0}')
   s.cwd = '/w/a'
   s.procs = [{ pid: 4242, ppid: 1, etime: '02:05', cwd: '/w/a', cmd: '/x/.venv/bin/python -m pytest tests/render -q' }]
   expect(await esito($, 'pytest tests', {})).toContain('4242')
@@ -134,7 +184,7 @@ const P1 = (cwd = '/w/a'): Proc => ({ pid: 4242, ppid: 1, etime: '02:05', cwd, c
 
 test('parità: stesso albero occupato -> rifiuto con PID', async ($, on) => {
   const s = world(on)
-  s.files.set(CONFIG, POKE)
+  s.files.set(CONFIG, POKE0)
   s.procs = [P1()]
   s.cwd = '/w/a'
   const d = await esito($, 'tools/suite.sh --nome x tests')
@@ -144,7 +194,7 @@ test('parità: stesso albero occupato -> rifiuto con PID', async ($, on) => {
 
 test("parità: cd <dir> in testa porta all'albero occupato", async ($, on) => {
   const s = world(on)
-  s.files.set(CONFIG, POKE)
+  s.files.set(CONFIG, POKE0)
   s.procs = [P1()]
   expect(await esito($, 'cd /w/a && .venv/bin/python -m pytest -q')).toContain('4242')
 })
@@ -158,7 +208,7 @@ test('parità: altro albero e meno di 3 -> passa', async ($, on) => {
 
 test("albero git: sottocartelle dello stesso repo sono lo stesso albero", async ($, on) => {
   const s = world(on)
-  s.files.set(CONFIG, POKE)
+  s.files.set(CONFIG, POKE0)
   s.procs = [P1('/w/a/sub')]
   s.toplevel.set('/w/a/sub', '/w/a')
   s.toplevel.set('/w/a/altro', '/w/a')
@@ -168,7 +218,7 @@ test("albero git: sottocartelle dello stesso repo sono lo stesso albero", async 
 
 test('parità: 3 sulla macchina -> rifiuto', async ($, on) => {
   const s = world(on)
-  s.files.set(CONFIG, POKE)
+  s.files.set(CONFIG, POKE0)
   s.procs = [
     { pid: 11, ppid: 1, etime: '05', cwd: '/w/a', cmd: 'python -m pytest x' },
     { pid: 12, ppid: 1, etime: '06', cwd: '/w/c', cmd: 'python -m pytest y' },
@@ -223,4 +273,133 @@ test('altri tool non toccati', async ($, on) => {
   s.files.set(CONFIG, '{}')
   const r = await $.tool.call({ tool: 'Read', file_path: '/x' } as never)
   expect(r.deny).toBe(undefined)
+})
+
+// 0.3.0: coda al posto dei rifiuti per concorrenza.
+
+const pesante = (pid: number, cwd: string): Proc => ({ pid, ppid: 1, etime: '01', cwd, cmd: 'python -m pytest -q' })
+
+test('coda: 4 comandi pesanti concorrenti, il quarto attende un posto e poi gira', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, POKE)
+  let pid = 100
+  s.avvio = c => { s.procs.push(pesante(pid++, /^cd (\S+)/.exec(c)?.[1] ?? s.cwd)) }
+  s.dopoSonno = n => { if (n === 3) s.procs.shift() } // il primo finisce dopo 15 s
+  const r = await Promise.all(['/w/a', '/w/b', '/w/c', '/w/d'].map(d => esito($, `cd ${d} && pytest -q`)))
+  expect(r).toEqual([undefined, undefined, undefined, undefined])
+  expect([...s.eseguiti].sort()).toEqual(['/w/a', '/w/b', '/w/c', '/w/d'].map(d => `cd ${d} && pytest -q`))
+  expect(s.sonni).toBe(3)
+  expect([...s.files.keys()].filter(k => k.startsWith(CODA))).toEqual([]) // prenotazioni tolte
+})
+
+test('coda: stesso albero occupato, attende che finisca invece di rifiutare', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, POKE)
+  s.procs = [P1()]
+  s.cwd = '/w/a'
+  s.dopoSonno = n => { if (n === 2) s.procs = [] }
+  expect(await esito($, 'pytest -q')).toBe(undefined)
+  expect(s.eseguiti).toEqual(['pytest -q'])
+  expect(s.sonni).toBe(2)
+})
+
+test('coda: scaduta attesaMassima, rifiuto chiaro con motivo e tempo, prenotazione tolta', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, JSON.stringify({ ...JSON.parse(POKE), attesaMassima: 60 }))
+  s.procs = [P1()]
+  s.cwd = '/w/a'
+  const d = await esito($, 'pytest -q')
+  expect(d).toContain('in coda da 1m')
+  expect(d).toContain('4242')
+  expect(d).toContain('riprova')
+  expect(s.eseguiti).toEqual([])
+  expect(s.sonni).toBe(12)
+  expect([...s.files.keys()].filter(k => k.startsWith(CODA))).toEqual([])
+})
+
+test("coda: un'attesa di un'altra sessione arrivata prima passa avanti; una scaduta no", async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, POKE)
+  s.cwd = '/w/a'
+  const altra = `${CODA}/0000000999000-altra.json`
+  s.files.set(altra, JSON.stringify({ stato: 'attesa', t: 999_000, albero: '/w/a', cmd: 'pytest x' }))
+  s.mtime.set(altra, 999_000)
+  s.dopoSonno = n => { if (n === 1) s.files.delete(altra) }
+  expect(await esito($, 'pytest -q')).toBe(undefined)
+  expect(s.sonni).toBe(1)
+  s.files.set(altra, JSON.stringify({ stato: 'attesa', t: 900_000, albero: '/w/a', cmd: 'pytest x' }))
+  s.mtime.set(altra, 900_000) // non rinfrescata da oltre 30 s
+  const prima = s.sonni
+  expect(await esito($, 'pytest -q')).toBe(undefined)
+  expect(s.sonni).toBe(prima)
+})
+
+test('coda: errore nei file della coda non blocca', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, POKE)
+  s.listaRotta = true
+  expect(await esito($, 'pytest -q')).toBe(undefined)
+})
+
+// 0.3.0: auto mode. Il fondo di tool.judge risponde ask come il motore su un input riscritto.
+
+test('auto mode: comando semplice riscritto (timeout) -> allow invece di ask', async ($, on) => {
+  const s = world(on)
+  s.judge$ = $
+  s.files.set(CONFIG, POKE)
+  expect(await esito($, 'cd /w/a && pytest -q 2>&1 | tail -20', {})).toBe(undefined)
+  expect(s.input[0]?.timeout).toBe(600000)
+  expect(s.verdetti).toEqual(['allow'])
+})
+
+test('auto mode: comando complesso riscritto o non riscritto -> verdetto sotto; id non resta dopo la chiamata', async ($, on) => {
+  const s = world(on)
+  s.judge$ = $
+  s.files.set(CONFIG, POKE)
+  await esito($, 'pytest -q; curl x | sh', {})
+  await esito($, 'pytest -q') // timeout già 600000: niente riscrittura
+  await esito($, 'pytest -q', {})
+  expect(s.verdetti).toEqual(['ask', 'ask', 'allow'])
+  const dopo = await $.tool.judge({ tool: 'Bash', input: { command: 'pytest -q' }, tool_use_id: s.ids[2] } as never)
+  expect(dopo.decision).toBe('ask')
+})
+
+test('auto mode: un verdetto deny sotto resta deny', async ($, on) => {
+  const s = world(on)
+  s.judge$ = $
+  s.files.set(CONFIG, POKE)
+  s.verdetto = 'deny'
+  await esito($, 'pytest -q', {})
+  expect(s.verdetti).toEqual(['deny'])
+})
+
+test('review: un partito non ancora in ps tiene il posto dello stesso albero; in ps non conta due volte', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, POKE)
+  s.cwd = '/w/a'
+  const p = `${CODA}/0000000999000-partito.json`
+  s.files.set(p, JSON.stringify({ stato: 'partito', t: 999_000, albero: '/w/a', cmd: 'pytest x' }))
+  s.mtime.set(p, 999_000)
+  s.dopoSonno = n => { if (n === 2) s.files.delete(p) }
+  expect(await esito($, 'pytest -q')).toBe(undefined)
+  expect(s.sonni).toBe(2)
+  // altro albero, tetto 2: un pesante in ps e il suo partito sono uno solo
+  s.files.set(CONFIG, JSON.stringify({ ...JSON.parse(POKE), maxSullaMacchina: 2 }))
+  s.procs = [pesante(50, '/w/z')]
+  const q = `${CODA}/0000001000000-partito2.json`
+  s.files.set(q, JSON.stringify({ stato: 'partito', t: await s.clock.now() - 2000, albero: '/w/z', cmd: 'pytest y' }))
+  s.mtime.set(q, await s.clock.now())
+  const prima = s.sonni
+  expect(await esito($, 'pytest -q')).toBe(undefined)
+  expect(s.sonni).toBe(prima)
+})
+
+test('review: un errore durante il sonno non lascia la prenotazione', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, POKE)
+  s.procs = [P1()]
+  s.cwd = '/w/a'
+  s.dopoSonno = () => { throw new Error('sonno rotto') }
+  await $.tool.call(bash('pytest -q')).catch(() => undefined)
+  expect([...s.files.keys()].filter(k => k.startsWith(CODA))).toEqual([])
 })

@@ -12,9 +12,11 @@ export type Config = {
   maxSullaMacchina: number
   controlloProcessi: boolean
   riassunto: boolean
+  attesaMassima: number
 }
 
-export type Processo = { pid: number; ppid: number; eta: number; cmd: string; albero?: string | null; cwd?: string | null }
+// `attesa`: una prenotazione della coda in attesa (pid 0), non un processo.
+export type Processo = { pid: number; ppid: number; eta: number; cmd: string; albero?: string | null; cwd?: string | null; attesa?: boolean }
 
 const PUNT = ';&|()'
 const SPAZI = ' \t\r\n'
@@ -194,6 +196,7 @@ export function configurazione(testo: string | undefined): Config | null {
     maxSullaMacchina: mx,
     controlloProcessi: typeof o.controlloProcessi === 'boolean' ? o.controlloProcessi : true,
     riassunto: o.riassunto === true,
+    attesaMassima: typeof o.attesaMassima === 'number' && o.attesaMassima >= 0 ? Math.floor(o.attesaMassima) : 1200,
   }
 }
 
@@ -312,7 +315,9 @@ export function pulisci(p: string): string {
 
 /** Il motivo del rifiuto se un comando pesante occupa già lo stesso albero, o il tetto sulla macchina è pieno.
  * `procs` ha l'albero già risolto; si contano solo i processi radice (né worker né figli di un pesante). */
-export function occupanti(procs: readonly Processo[], mio: string | null, cfg: Config, genitori?: Map<number, number>): string | undefined {
+export function occupanti(
+  procs: readonly Processo[], mio: string | null, cfg: Config, genitori?: Map<number, number>, prenotati: readonly Processo[] = [],
+): string | undefined {
   const pesanti = procs.filter(p => principale(p.cmd, cfg))
   const pids = new Set(pesanti.map(p => p.pid))
   const haAntenatoPesante = (p: Processo) => {
@@ -325,20 +330,152 @@ export function occupanti(procs: readonly Processo[], mio: string | null, cfg: C
     }
     return false
   }
-  const radici = pesanti.filter(p => !haAntenatoPesante(p))
+  const radici = [...pesanti.filter(p => !haAntenatoPesante(p)), ...prenotati]
   const desc = (p: Processo, motivo: string) => {
     const c = p.cmd.length <= 80 ? p.cmd : `${p.cmd.slice(0, 77)}...`
-    return `${motivo}: occupa il posto il PID ${p.pid} (in corso da ${etaLeggibile(Math.trunc(p.eta))}, ` +
+    const chi = p.pid > 0 ? `il PID ${p.pid}` : 'un comando pesante in coda o appena partito'
+    return `${motivo}: occupa il posto ${chi} (da ${etaLeggibile(Math.trunc(p.eta))}, ` +
       `albero ${p.albero || 'sconosciuto'}, comando \`${c}\`). Aspetta che finisca o fermalo se è un tuo doppione.`
   }
   if (mio) {
     const stesso = radici.find(p => p.albero === mio)
     if (stesso) return desc(stesso, 'Nello stesso albero di lavoro gira già un comando pesante')
   }
-  const contati = radici.filter(p => !pesanteTok(tokenizza(p.cmd, false) ?? p.cmd.split(/\s+/), cfg.nonContati))
+  // Un'attesa ferma dietro un occupante del suo stesso albero non prenderà un posto ora: fuori dal tetto.
+  const ferma = (p: Processo) => p.attesa === true && radici.some(q => !q.attesa && q.albero && q.albero === p.albero)
+  const contati = radici.filter(p => !ferma(p) && !pesanteTok(tokenizza(p.cmd, false) ?? p.cmd.split(/\s+/), cfg.nonContati))
   if (cfg.maxSullaMacchina > 0 && contati.length >= cfg.maxSullaMacchina) {
     const vecchio = contati.reduce((a, b) => (b.eta > a.eta ? b : a))
     return desc(vecchio, `Sulla macchina girano già ${contati.length} comandi pesanti (massimo ${cfg.maxSullaMacchina})`)
   }
   return undefined
+}
+
+/** Una prenotazione della coda, da un file di `~/.claude/no-suite-background/coda/`. `nome` ordina la coda
+ * (istante d'ingresso a 13 cifre, poi un id); `agg` è l'ultimo rinfresco (mtime del file). */
+export type Prenotazione = { nome: string; stato: 'attesa' | 'partito'; t: number; agg: number; albero: string | null; cmd: string }
+
+/** Oltre questa età una prenotazione non conta: un'attesa non rinfrescata (sessione morta), un partito già in `ps`. */
+export const SCADENZA_PRENOTAZIONE = 30_000
+
+/** Le prenotazioni degli altri che occupano un posto per `mio`, come processi senza PID (`eta` in secondi):
+ * le attese vive arrivate prima (FIFO) e i partiti recenti che `ps` non mostra ancora (nessuna radice nello stesso
+ * albero con un'età compatibile). */
+export function prenotati(lista: readonly Prenotazione[], mio: string, procs: readonly Processo[], ora: number): Processo[] {
+  return lista.filter(p => {
+    if (p.nome === mio) return false
+    if (p.stato === 'attesa') return p.nome < mio && ora - p.agg <= SCADENZA_PRENOTAZIONE
+    const eta = (ora - p.t) / 1000
+    if (ora - p.t > SCADENZA_PRENOTAZIONE) return false
+    return !procs.some(q => p.albero !== null && q.albero === p.albero && q.eta <= eta + 5)
+  }).map(p => ({ pid: 0, ppid: 0, eta: Math.max(0, (ora - p.t) / 1000), cmd: p.cmd, albero: p.albero, attesa: p.stato === 'attesa' }))
+}
+
+const OPERATORI = new Set(['&&', '||', ';', '|'])
+// Variabili che non cambiano cosa viene eseguito (LD_PRELOAD, PATH, NODE_OPTIONS, PYTEST_ADDOPTS sì: escluse).
+const VARIABILI = new Set(['CI', 'FORCE_COLOR', 'NO_COLOR', 'PYTHONUNBUFFERED', 'PYTHONDONTWRITEBYTECODE', 'TERM', 'COLUMNS'])
+const PYTHON = /^((\.?venv|\.env)\/bin\/)?python(3(\.\d+)?)?$/
+const ASSEGNA = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+/** Il comando pesante di una parte, letto in modo stretto: solo variabili innocue, prefissi `time`, `timeout N`,
+ * `npx`, `bunx`, `uv|poetry|pipenv|pdm run`, `[.venv/bin/]python -m` senza altre opzioni; il programma col nome
+ * esatto della voce (`./voce` solo per le voci con un percorso); niente `-p` (salvo `-p no:…`), `-c`, `--config`,
+ * `--script-shell`, che fanno caricare codice scelto dalla riga. */
+function pesanteStretto(t: readonly string[], cfg: Config): boolean {
+  let i = 0
+  for (; ASSEGNA.test(t[i] ?? ''); i++) if (!VARIABILI.has((t[i] ?? '').split('=')[0] ?? '')) return false
+  for (let giri = 0; giri < 4; giri++) {
+    const x = t[i] ?? ''
+    if (x === 'time' || x === 'npx' || x === 'bunx') i++
+    else if (x === 'timeout' && /^\d+[smh]?$/.test(t[i + 1] ?? '')) i += 2
+    else if (RUNNER.has(x) && t[i + 1] === 'run') i += 2
+    else if (PYTHON.test(x) && t[i + 1] === '-m') i += 2
+    else if (PYTHON.test(x) && t[i + 1] === '-u' && t[i + 2] === '-m') i += 3
+    else break
+  }
+  const r = t.slice(i)
+  const v = cfg.voci.find(v => v.length > 0 && r.length >= v.length && (r[0] === v[0] || (v[0]?.includes('/') && r[0] === `./${v[0]}`)) &&
+    v.slice(1).every((w, k) => r[k + 1] === w))
+  if (!v) return false
+  return argomentiNoti(r.slice(v.length), (v[0] ?? '').includes('/'))
+}
+
+// Opzioni ammesse dopo un comando pesante: solo quelle che non fanno leggere configurazioni o caricare codice.
+const FLAG = /^-[qvxsl]+$|^--(lf|ff|last-failed|failed-first|exitfirst|quiet|verbose|no-header|co|collect-only|release|no-fail-fast)$/
+const CON_VALORE = new Set(['-k', '-m', '-n', '-t'])
+const VALORE = /^--(tb|maxfail|durations)=[\w.]+$|^-n\d+$/
+
+/** Gli argomenti di un comando pesante: posizionali, `--` e le opzioni note (`FLAG`, `-k|-m|-n|-t valore`,
+ * `--tb=…`, `-p no:…`); per un comando con un percorso (uno script del progetto) anche `--parola` senza valore,
+ * salvo quelle che nominano configurazioni, shell, plugin o moduli da caricare. */
+function argomentiNoti(args: readonly string[], script: boolean): boolean {
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k] ?? ''
+    if (!a.startsWith('-') || a === '--' || FLAG.test(a) || VALORE.test(a)) continue
+    if (CON_VALORE.has(a) || (a === '-p' && (args[k + 1] ?? '').startsWith('no:'))) {
+      k++
+      continue
+    }
+    if (script && /^--[a-z][a-z-]*$/.test(a) && !/config|shell|plugin|rc|preload|require/.test(a)) continue
+    return false
+  }
+  return true
+}
+
+/** Un filtro in pipe che legge solo lo standard input e non scrive file né esegue programmi. */
+function filtro(t: readonly string[]): boolean {
+  const r = t.slice(1)
+  switch (t[0]) {
+    case 'true':
+      return r.length === 0
+    case 'echo':
+      return true
+    case 'tail':
+    case 'head':
+      return /^((-n|-c) ?\d+|-\d+)?$/.test(r.join(' '))
+    case 'wc':
+      return r.every(a => /^-[lwcm]+$/.test(a))
+    case 'grep': {
+      let posizionali = 0
+      for (let k = 0; k < r.length; k++) {
+        const a = r[k] ?? ''
+        if (/^-[ABCme]$/.test(a)) k++
+        else if (/^-[EFivcnwoqx]+$|^-[ABCm]\d+$/.test(a)) continue
+        else if (a.startsWith('-')) return false
+        else posizionali++
+      }
+      return posizionali <= 1 // solo il motivo: un file da leggere no
+    }
+    default:
+      return false
+  }
+}
+
+/** Il comando è un solo comando pesante (letto da `pesanteStretto`), al più con `cd <dir>` e filtri in pipe
+ * (`filtro`), uniti da `&&`, `||`, `;`, `|`: niente `$`, graffe, sostituzioni, redirezioni (salvo `2>&1`),
+ * background, sottoshell, a capo. Solo su questi, riscritti dalla mod, il hook `tool.judge` risponde allow al posto
+ * del classificatore dell'auto mode. */
+export function semplice(cmd: string, cfg: Config): boolean {
+  const s = cmd.replace(/(^|\s)2>&1(?=\s|$)/g, ' ')
+  if (/[<>`\n\\${}]/.test(s)) return false
+  const tok = tokenizza(s, true)
+  if (tok === null) return false
+  let pesanti = 0
+  let parte: string[] = []
+  const chiudi = (): boolean => {
+    const t = parte
+    parte = []
+    if (t.length === 0) return false
+    if (t[0] === 'cd') return t.length <= 2
+    if (filtro(t)) return true
+    if (!pesanteStretto(t, cfg)) return false
+    pesanti++
+    return true
+  }
+  for (const t of tok) {
+    if (t !== '' && [...t].every(c => PUNT.includes(c))) {
+      if (!OPERATORI.has(t) || !chiudi()) return false
+    } else parte.push(t)
+  }
+  return chiudi() && pesanti === 1
 }

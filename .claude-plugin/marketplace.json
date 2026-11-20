@@ -21,7 +21,7 @@
     {
       "name": "no-suite-background",
       "source": "./mods/no-suite-background",
-      "description": "Suite e build solo in primo piano, una per Bash, con timeout 600000 impostato dalla mod: niente agenti fermi ad aspettare una notifica che non arriva. Attiva per progetto."
+      "description": "Suite e build solo in primo piano, una per Bash, con timeout 600000 impostato dalla mod e una coda se la macchina è piena: niente agenti fermi ad aspettare. Compatibile con l'auto mode. Attiva per progetto."
     }
   ]
 }
