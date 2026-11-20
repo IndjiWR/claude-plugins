@@ -15,7 +15,8 @@ export type Config = {
   attesaMassima: number
 }
 
-export type Processo = { pid: number; ppid: number; eta: number; cmd: string; albero?: string | null; cwd?: string | null }
+// `attesa`: una prenotazione della coda in attesa (pid 0), non un processo.
+export type Processo = { pid: number; ppid: number; eta: number; cmd: string; albero?: string | null; cwd?: string | null; attesa?: boolean }
 
 const PUNT = ';&|()'
 const SPAZI = ' \t\r\n'
@@ -340,7 +341,9 @@ export function occupanti(
     const stesso = radici.find(p => p.albero === mio)
     if (stesso) return desc(stesso, 'Nello stesso albero di lavoro gira già un comando pesante')
   }
-  const contati = radici.filter(p => !pesanteTok(tokenizza(p.cmd, false) ?? p.cmd.split(/\s+/), cfg.nonContati))
+  // Un'attesa ferma dietro un occupante del suo stesso albero non prenderà un posto ora: fuori dal tetto.
+  const ferma = (p: Processo) => p.attesa === true && radici.some(q => !q.attesa && q.albero && q.albero === p.albero)
+  const contati = radici.filter(p => !ferma(p) && !pesanteTok(tokenizza(p.cmd, false) ?? p.cmd.split(/\s+/), cfg.nonContati))
   if (cfg.maxSullaMacchina > 0 && contati.length >= cfg.maxSullaMacchina) {
     const vecchio = contati.reduce((a, b) => (b.eta > a.eta ? b : a))
     return desc(vecchio, `Sulla macchina girano già ${contati.length} comandi pesanti (massimo ${cfg.maxSullaMacchina})`)
@@ -365,19 +368,78 @@ export function prenotati(lista: readonly Prenotazione[], mio: string, procs: re
     const eta = (ora - p.t) / 1000
     if (ora - p.t > SCADENZA_PRENOTAZIONE) return false
     return !procs.some(q => p.albero !== null && q.albero === p.albero && q.eta <= eta + 5)
-  }).map(p => ({ pid: 0, ppid: 0, eta: Math.max(0, (ora - p.t) / 1000), cmd: p.cmd, albero: p.albero }))
+  }).map(p => ({ pid: 0, ppid: 0, eta: Math.max(0, (ora - p.t) / 1000), cmd: p.cmd, albero: p.albero, attesa: p.stato === 'attesa' }))
 }
 
-const FILTRI = new Set(['tail', 'head', 'grep', 'wc', 'sort', 'uniq', 'cut', 'true', 'echo'])
-const VIETATI = new Set(['sudo', 'xargs', 'eval', 'exec', 'source', '.', ...SHELL])
 const OPERATORI = new Set(['&&', '||', ';', '|'])
+// Variabili che non cambiano cosa viene eseguito (LD_PRELOAD, PATH, NODE_OPTIONS, PYTEST_ADDOPTS sì: escluse).
+const VARIABILI = new Set(['CI', 'FORCE_COLOR', 'NO_COLOR', 'PYTHONUNBUFFERED', 'PYTHONDONTWRITEBYTECODE', 'TERM', 'COLUMNS'])
+const PYTHON = /^((\.?venv|\.env)\/bin\/)?python(3(\.\d+)?)?$/
+const ASSEGNA = /^[A-Za-z_][A-Za-z0-9_]*=/
 
-/** Il comando è un solo comando pesante, al più con `cd <dir>` e filtri in pipe (`tail`, `grep`…, anche `true` ed `echo`), uniti da
- * `&&`, `||`, `;`, `|`: niente sostituzioni, redirezioni (salvo `2>&1`), background, sottoshell, a capo. Solo su
- * questi, riscritti dalla mod, il hook `tool.judge` risponde allow al posto del classificatore dell'auto mode. */
+/** Il comando pesante di una parte, letto in modo stretto: solo variabili innocue, prefissi `time`, `timeout N`,
+ * `npx`, `bunx`, `uv|poetry|pipenv|pdm run`, `[.venv/bin/]python -m` senza altre opzioni; il programma col nome
+ * esatto della voce (`./voce` solo per le voci con un percorso); niente `-p` (salvo `-p no:…`), `-c`, `--config`,
+ * `--script-shell`, che fanno caricare codice scelto dalla riga. */
+function pesanteStretto(t: readonly string[], cfg: Config): boolean {
+  let i = 0
+  for (; ASSEGNA.test(t[i] ?? ''); i++) if (!VARIABILI.has((t[i] ?? '').split('=')[0] ?? '')) return false
+  for (let giri = 0; giri < 4; giri++) {
+    const x = t[i] ?? ''
+    if (x === 'time' || x === 'npx' || x === 'bunx') i++
+    else if (x === 'timeout' && /^\d+[smh]?$/.test(t[i + 1] ?? '')) i += 2
+    else if (RUNNER.has(x) && t[i + 1] === 'run') i += 2
+    else if (PYTHON.test(x) && t[i + 1] === '-m') i += 2
+    else if (PYTHON.test(x) && t[i + 1] === '-u' && t[i + 2] === '-m') i += 3
+    else break
+  }
+  const r = t.slice(i)
+  const v = cfg.voci.find(v => v.length > 0 && r.length >= v.length && (r[0] === v[0] || (v[0]?.includes('/') && r[0] === `./${v[0]}`)) &&
+    v.slice(1).every((w, k) => r[k + 1] === w))
+  if (!v) return false
+  return r.slice(v.length).every((a, k, args) => {
+    if (a === '-p') return (args[k + 1] ?? '').startsWith('no:')
+    if (a.startsWith('-p') && !a.startsWith('--')) return a.startsWith('-pno:')
+    return a !== '-c' && !a.startsWith('--config') && !a.startsWith('--script-shell')
+  })
+}
+
+/** Un filtro in pipe che legge solo lo standard input e non scrive file né esegue programmi. */
+function filtro(t: readonly string[]): boolean {
+  const r = t.slice(1)
+  switch (t[0]) {
+    case 'true':
+      return r.length === 0
+    case 'echo':
+      return true
+    case 'tail':
+    case 'head':
+      return /^((-n|-c) ?\d+|-\d+)?$/.test(r.join(' '))
+    case 'wc':
+      return r.every(a => /^-[lwcm]+$/.test(a))
+    case 'grep': {
+      let posizionali = 0
+      for (let k = 0; k < r.length; k++) {
+        const a = r[k] ?? ''
+        if (/^-[ABCme]$/.test(a)) k++
+        else if (/^-[EFivcnwoqx]+$|^-[ABCm]\d+$/.test(a)) continue
+        else if (a.startsWith('-')) return false
+        else posizionali++
+      }
+      return posizionali <= 1 // solo il motivo: un file da leggere no
+    }
+    default:
+      return false
+  }
+}
+
+/** Il comando è un solo comando pesante (letto da `pesanteStretto`), al più con `cd <dir>` e filtri in pipe
+ * (`filtro`), uniti da `&&`, `||`, `;`, `|`: niente `$`, graffe, sostituzioni, redirezioni (salvo `2>&1`),
+ * background, sottoshell, a capo. Solo su questi, riscritti dalla mod, il hook `tool.judge` risponde allow al posto
+ * del classificatore dell'auto mode. */
 export function semplice(cmd: string, cfg: Config): boolean {
   const s = cmd.replace(/(^|\s)2>&1(?=\s|$)/g, ' ')
-  if (/[<>`\n\\]|\$\(/.test(s)) return false
+  if (/[<>`\n\\${}]/.test(s)) return false
   const tok = tokenizza(s, true)
   if (tok === null) return false
   let pesanti = 0
@@ -386,12 +448,9 @@ export function semplice(cmd: string, cfg: Config): boolean {
     const t = parte
     parte = []
     if (t.length === 0) return false
-    const b = base(t[0] ?? '')
-    if (b === 'cd') return t.length <= 2
-    if (FILTRI.has(b)) return true
-    if (VIETATI.has(b)) return false
-    const n = normalizza(t)
-    if (VIETATI.has(base(n[0] ?? '')) || !cfg.voci.some(v => corrisponde(n, v))) return false
+    if (t[0] === 'cd') return t.length <= 2
+    if (filtro(t)) return true
+    if (!pesanteStretto(t, cfg)) return false
     pesanti++
     return true
   }

@@ -121,11 +121,19 @@ export const register: Register = on => {
     if (motivo) return { deny: `${$.plugin.name}: ${motivo}` }
     const modifica = correggi(e, cfg)
     const finale = modifica ? { ...e, ...modifica } : e
-    if (modifica && typeof e.tool_use_id === 'string' && typeof e.command === 'string' && semplice(e.command, cfg)) {
-      if (riscritti.size > 1000) riscritti.clear()
-      riscritti.add(e.tool_use_id)
+    // In auto mode il judge di questa chiamata scatta dentro next: l'id vale solo per la sua durata.
+    const id = modifica && typeof e.tool_use_id === 'string' && typeof e.command === 'string' && semplice(e.command, cfg)
+      ? e.tool_use_id
+      : undefined
+    const esegui = async () => {
+      if (id !== undefined) riscritti.add(id)
+      try {
+        return await next(finale)
+      } finally {
+        if (id !== undefined) riscritti.delete(id)
+      }
     }
-    if (!cfg.controlloProcessi || typeof e.command !== 'string' || quantiPesanti(e.command, cfg) === 0) return next(finale)
+    if (!cfg.controlloProcessi || typeof e.command !== 'string' || quantiPesanti(e.command, cfg) === 0) return esegui()
 
     // Coda: si aspetta un posto (stesso albero libero, tetto non pieno), un giro ogni SONNO_S secondi.
     let mio: string | null = null
@@ -149,41 +157,38 @@ export const register: Register = on => {
         // senza file la coda vale solo per questo processo: si va avanti col solo ps
       }
     }
-    await scrivi('attesa', inizio)
-    for (;;) {
-      let msg: string | undefined
-      try {
-        const { genitori, procs } = await processi($, cfg)
-        const ora = await $.clock.now()
-        const altri = coda && dir !== null ? prenotati(await leggiCoda($, dir, ora), nome, procs, ora) : []
-        msg = occupanti(procs, mio, cfg, genitori, altri)
-      } catch {
-        msg = undefined // mai bloccare per un errore nella lettura dei processi
-      }
-      if (!msg) break
-      if (!coda) return { deny: `${$.plugin.name}: ${msg}` }
-      const atteso = ((await $.clock.now()) - inizio) / 1000
-      if (atteso >= cfg.attesaMassima || next.signal.aborted) {
-        await togli($, file)
-        return {
-          deny: `${$.plugin.name}: in coda da ${etaLeggibile(Math.trunc(atteso))} senza un posto ` +
-            `(attesaMassima ${cfg.attesaMassima} s). ${msg} Non aspettare con sleep: riprova più tardi o fai altro intanto.`,
-        }
-      }
-      await scrivi('attesa', inizio) // rinfresco: un'attesa ferma da 30 s è di una sessione morta
-      await $.process.run(['sleep', String(SONNO_S)], { timeoutMs: (SONNO_S + 10) * 1000 })
-    }
-    if (!coda) return next(finale)
-    await scrivi('partito', await $.clock.now())
     try {
-      return await next(finale)
+      for (;;) {
+        await scrivi('attesa', inizio) // rinfresco a ogni giro: un'attesa ferma da 30 s è di una sessione morta
+        let msg: string | undefined
+        try {
+          const { genitori, procs } = await processi($, cfg)
+          const ora = await $.clock.now()
+          const altri = coda && dir !== null ? prenotati(await leggiCoda($, dir, ora), nome, procs, ora) : []
+          msg = occupanti(procs, mio, cfg, genitori, altri)
+        } catch {
+          msg = undefined // mai bloccare per un errore nella lettura dei processi
+        }
+        if (!msg) break
+        if (!coda) return { deny: `${$.plugin.name}: ${msg}` }
+        const atteso = ((await $.clock.now()) - inizio) / 1000
+        if (atteso >= cfg.attesaMassima || next.signal.aborted) {
+          return {
+            deny: `${$.plugin.name}: in coda da ${etaLeggibile(Math.trunc(atteso))} senza un posto ` +
+              `(attesaMassima ${cfg.attesaMassima} s). ${msg} Non aspettare con sleep: riprova più tardi o fai altro intanto.`,
+          }
+        }
+        await $.process.run(['sleep', String(SONNO_S)], { timeoutMs: (SONNO_S + 10) * 1000 })
+      }
+      await scrivi('partito', await $.clock.now())
+      return await esegui()
     } finally {
-      await togli($, file)
+      if (coda) await togli($, file)
     }
   })
   on('tool.judge', { tool: 'Bash' }, async ($, e, next) => {
     const r = await next(e)
-    const nostro = riscritti.delete(e.tool_use_id)
+    const nostro = riscritti.has(e.tool_use_id)
     if (r.decision === 'ask' && nostro) {
       return { decision: 'allow', reason: `${$.plugin.name}: comando pesante semplice, input cambiato dalla mod (timeout o riassunto)` }
     }

@@ -295,3 +295,24 @@ test('occupanti con prenotati: contano per albero e tetto, motivo senza PID', ()
   expect(occupanti(P3.slice(0, 2), '/w/b', POKE, undefined, pr)).toContain('3 comandi pesanti')
   expect(occupanti(P3.slice(0, 2), '/w/b', POKE, undefined, [])).toBe(undefined)
 })
+
+test('review: semplice rifiuta prefissi che nascondono comandi, variabili pericolose, percorsi, filtri che scrivono', () => {
+  const s = (c: string) => semplice(c, POKE)
+  expect(['nice sudo -u root pytest', 'env sudo npm test', 'timeout 5 xargs -I{} pytest', 'env bash pytest',
+    'command sudo pytest', "env -S 'sh -c evil' pytest", 'LD_PRELOAD=/tmp/x.so pytest', 'PYTEST_ADDOPTS="-p evil" pytest',
+    'PATH=/tmp/evil:$PATH pytest', './pytest', '/tmp/x/pytest', 'python pytest', 'node pytest', 'bash tools/suite.sh',
+    'pytest | sort -o ~/.zshrc', 'pytest | uniq a b', 'pytest | tail -f', 'pytest -p evil', 'pytest -c conf.ini',
+    'pytest ${x@P}', 'pytest $X', 'evil/tools/suite.sh', '/tmp/python -m pytest', 'nohup pytest'].map(s))
+    .toEqual(Array(24).fill(false))
+  expect(['CI=1 pytest', 'timeout 900 pytest -q', 'time pytest', '.venv/bin/python -m pytest -q', 'python3 -u -m pytest',
+    'tools/suite.sh --nome x', './tools/suite.sh', 'pytest -p no:cacheprovider', 'pytest -q 2>&1 | grep -E "passed|failed" | tail -n 5',
+    'pytest | head -50 | wc -l'].map(s)).toEqual(Array(10).fill(true))
+})
+
+test("review: un'attesa bloccata sullo stesso albero di un occupante non conta nel tetto", () => {
+  const cfg = configurazione('{}')!
+  const run: Processo[] = [{ pid: 9, ppid: 1, eta: 50, albero: '/w/x', cmd: 'pytest' }]
+  const att = (albero: string): Processo => ({ pid: 0, ppid: 0, eta: 5, albero, cmd: 'pytest', attesa: true })
+  expect(occupanti(run, '/w/y', cfg, undefined, [att('/w/x'), att('/w/x')])).toBe(undefined)
+  expect(occupanti(run, '/w/y', cfg, undefined, [att('/w/z'), att('/w/k')])).toContain('3 comandi pesanti')
+})

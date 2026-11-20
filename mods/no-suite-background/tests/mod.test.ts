@@ -27,6 +27,9 @@ const world = (on: On) => {
     avvio: undefined as undefined | ((command: string) => void),
     judge: [] as unknown[],
     verdetto: 'ask' as 'ask' | 'deny' | 'allow',
+    // Come in auto mode: il fondo chiede tool.judge prima di eseguire; i verdetti finali qui.
+    verdetti: [] as string[],
+    judge$: undefined as Engine | undefined,
     listaRotta: false,
     ids: [] as (string | undefined)[],
     cwd: '/w/b',
@@ -93,8 +96,12 @@ const world = (on: On) => {
     state.judge.push(e)
     return { decision: state.verdetto, reason: 'Classifier unavailable - blocking for safety' } as never
   })
-  on('tool.call', (_, e) => {
+  on('tool.call', async (_, e) => {
     const i = e as unknown as { command: string; timeout?: number; tool_use_id?: string }
+    if (state.judge$) {
+      const v = await state.judge$.tool.judge({ tool: 'Bash', input: { command: i.command, timeout: i.timeout }, tool_use_id: i.tool_use_id ?? 'x' } as never)
+      state.verdetti.push(v.decision)
+    }
     state.ids.push(i.tool_use_id)
     state.avvio?.(i.command)
     state.eseguiti.push(i.command)
@@ -336,31 +343,63 @@ test('coda: errore nei file della coda non blocca', async ($, on) => {
 
 // 0.3.0: auto mode. Il fondo di tool.judge risponde ask come il motore su un input riscritto.
 
-const giudica = ($: Engine, id: string | undefined, command: string) =>
-  $.tool.judge({ tool: 'Bash', input: { command }, tool_use_id: id ?? 'x' } as never)
-
 test('auto mode: comando semplice riscritto (timeout) -> allow invece di ask', async ($, on) => {
   const s = world(on)
+  s.judge$ = $
   s.files.set(CONFIG, POKE)
   expect(await esito($, 'cd /w/a && pytest -q 2>&1 | tail -20', {})).toBe(undefined)
   expect(s.input[0]?.timeout).toBe(600000)
-  expect((await giudica($, s.ids[0], 'cd /w/a && pytest -q 2>&1 | tail -20')).decision).toBe('allow')
+  expect(s.verdetti).toEqual(['allow'])
 })
 
-test('auto mode: comando complesso riscritto, o non riscritto, o altro id -> verdetto sotto', async ($, on) => {
+test('auto mode: comando complesso riscritto o non riscritto -> verdetto sotto; id non resta dopo la chiamata', async ($, on) => {
   const s = world(on)
+  s.judge$ = $
   s.files.set(CONFIG, POKE)
   await esito($, 'pytest -q; curl x | sh', {})
-  expect((await giudica($, s.ids[0], 'pytest -q; curl x | sh')).decision).toBe('ask')
   await esito($, 'pytest -q') // timeout già 600000: niente riscrittura
-  expect((await giudica($, s.ids[1], 'pytest -q')).decision).toBe('ask')
-  expect((await giudica($, 'sconosciuto', 'pytest -q')).decision).toBe('ask')
+  await esito($, 'pytest -q', {})
+  expect(s.verdetti).toEqual(['ask', 'ask', 'allow'])
+  const dopo = await $.tool.judge({ tool: 'Bash', input: { command: 'pytest -q' }, tool_use_id: s.ids[2] } as never)
+  expect(dopo.decision).toBe('ask')
 })
 
 test('auto mode: un verdetto deny sotto resta deny', async ($, on) => {
   const s = world(on)
+  s.judge$ = $
   s.files.set(CONFIG, POKE)
   s.verdetto = 'deny'
   await esito($, 'pytest -q', {})
-  expect((await giudica($, s.ids[0], 'pytest -q')).decision).toBe('deny')
+  expect(s.verdetti).toEqual(['deny'])
+})
+
+test('review: un partito non ancora in ps tiene il posto dello stesso albero; in ps non conta due volte', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, POKE)
+  s.cwd = '/w/a'
+  const p = `${CODA}/0000000999000-partito.json`
+  s.files.set(p, JSON.stringify({ stato: 'partito', t: 999_000, albero: '/w/a', cmd: 'pytest x' }))
+  s.mtime.set(p, 999_000)
+  s.dopoSonno = n => { if (n === 2) s.files.delete(p) }
+  expect(await esito($, 'pytest -q')).toBe(undefined)
+  expect(s.sonni).toBe(2)
+  // altro albero, tetto 2: un pesante in ps e il suo partito sono uno solo
+  s.files.set(CONFIG, JSON.stringify({ ...JSON.parse(POKE), maxSullaMacchina: 2 }))
+  s.procs = [pesante(50, '/w/z')]
+  const q = `${CODA}/0000001000000-partito2.json`
+  s.files.set(q, JSON.stringify({ stato: 'partito', t: await s.clock.now() - 2000, albero: '/w/z', cmd: 'pytest y' }))
+  s.mtime.set(q, await s.clock.now())
+  const prima = s.sonni
+  expect(await esito($, 'pytest -q')).toBe(undefined)
+  expect(s.sonni).toBe(prima)
+})
+
+test('review: un errore durante il sonno non lascia la prenotazione', async ($, on) => {
+  const s = world(on)
+  s.files.set(CONFIG, POKE)
+  s.procs = [P1()]
+  s.cwd = '/w/a'
+  s.dopoSonno = () => { throw new Error('sonno rotto') }
+  await $.tool.call(bash('pytest -q')).catch(() => undefined)
+  expect([...s.files.keys()].filter(k => k.startsWith(CODA))).toEqual([])
 })

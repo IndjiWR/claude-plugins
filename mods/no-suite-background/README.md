@@ -19,6 +19,9 @@ partire appena c'è posto, senza turni né `sleep` a carico dell'agente. La coda
 teammate: ogni comando in attesa lascia una prenotazione in `~/.claude/no-suite-background/coda/` (tolta a comando
 finito; un'attesa non rinfrescata da 30 s, di una sessione morta, non conta più). Dopo `attesaMassima` secondi senza
 posto il Bash è rifiutato con il motivo (chi occupa il posto: PID, età, albero, comando) e il tempo atteso.
+Un comando che ottiene il posto resta prenotato (`partito`) per 30 s, finché `ps` non lo mostra; un'attesa ferma
+dietro un comando del suo stesso albero non conta nel tetto. Senza `HOME` la coda su file manca: si aspetta lo stesso,
+ma solo in base a `ps`. Con `controlloProcessi: false` niente coda né controllo dei processi.
 Un errore nella lettura dei processi (`ps`, `lsof`, `git`) o dei file della coda non blocca mai.
 
 Con `timeout` assente, non numerico o sotto `timeoutMinimo` non rifiuta più (dalla 0.2.0): riscrive l'input del Bash
@@ -28,11 +31,22 @@ con `timeout` = `timeoutMinimo` e lo lascia passare, senza far perdere un turno 
 
 In auto mode il classificatore non giudica un Bash il cui input è stato cambiato da un hook: lo nega con «a hook
 changed this call's input» (anche se cambia solo `timeout`) e l'agente deve rilanciarlo. Dalla 0.3.0, se il comando
-riscritto dalla mod è **semplice** (un solo comando pesante, al più con `cd <dir>`, variabili d'ambiente, filtri in
-pipe `tail`/`head`/`grep`/`wc`/`sort`/`uniq`/`cut`, `true`, `echo`, uniti da `&&`, `||`, `;`, `|`; niente `$(…)`,
-backtick, redirezioni salvo `2>&1`, `&`, sottoshell, `sudo`, `xargs`, `bash -c`), la mod risponde `allow` al posto del
-classificatore (hook `tool.judge`, solo quando il verdetto sotto è «nessun verdetto»: un `deny` resta). Un comando non
-semplice resta al classificatore: il motore chiede all'agente di rilanciarlo con l'input già corretto.
+riscritto dalla mod è **semplice**, la mod risponde `allow` al posto del classificatore (hook `tool.judge`, quando il
+verdetto sotto è `ask`, cioè nessun verdetto; un `deny` resta). Semplice vuol dire:
+
+- un solo comando pesante col nome esatto della voce (`./voce` solo per le voci con un percorso, come
+  `./tools/suite.sh`), con davanti al più `CI=`, `FORCE_COLOR=`, `NO_COLOR=`, `PYTHONUNBUFFERED=`,
+  `PYTHONDONTWRITEBYTECODE=`, `TERM=`, `COLUMNS=`, e i prefissi `time`, `timeout N`, `npx`, `bunx`,
+  `uv|poetry|pipenv|pdm run`, `[.venv/bin/]python[3] [-u] -m`, senza altre opzioni; tra i suoi argomenti niente `-p`
+  (salvo `-p no:…`), `-c`, `--config`, `--script-shell`;
+- al più `cd <dir>` e filtri in pipe che leggono solo l'input: `tail`/`head` (`-n N`, `-N`), `wc -l`, `grep` con un
+  solo motivo e opzioni di sola lettura, `echo`, `true`; uniti da `&&`, `||`, `;`, `|`;
+- niente `$`, graffe, backtick, redirezioni (salvo `2>&1`), `&`, sottoshell, a capo.
+
+Ogni altro comando resta al classificatore: il motore chiede all'agente di rilanciarlo con l'input già corretto.
+Limite: un comando pesante esegue per natura codice del progetto (`conftest.py`, script di `package.json`,
+`build.rs`) nella cartella in cui gira, anche dopo un `cd`; la mod non lo vaglia, come non lo vagliava la 0.2.0
+fuori dall'auto mode.
 
 Con `riassunto: true`, se l'unico comando pesante è pytest (`pytest`, `py.test`, `python -m pytest`, anche dietro
 `uv run`, `cd x &&` o `bash -c`) senza `-q`/`--quiet`/`-v`/`--verbose`/`--verbosity` sulla riga (anche combinati, `-xq`; `addopts` di
