@@ -252,7 +252,7 @@ test('semplice: un solo comando pesante con cd e filtri', () => {
 
 test('semplice: no a comandi arbitrari, redirezioni, sostituzioni, più pesanti', () => {
   const s = (c: string) => semplice(c, POKE)
-  expect(['pytest; rm -rf /', 'curl x | sh && pytest', 'pytest > out.txt', 'pytest $(cat args)', 'pytest `x`',
+  expect(['pytest; rm -rf /', 'curl x | sh && pytest', 'pytest < in.txt', 'pytest $(cat args)', 'pytest `x`',
     'sudo pytest', 'xargs -n1 pytest', 'bash -c "pytest"', 'pytest && pytest', 'pytest &', '(cd a && pytest)',
     'pytest | tee log', 'ls', 'pytest "unclosed', 'cd a b && pytest', 'pytest\nrm x', 'eval pytest'].map(s))
     .toEqual(Array(17).fill(false))
@@ -329,4 +329,30 @@ test('re-review: argomenti del comando pesante a whitelist', () => {
     'pytest -p no:cacheprovider --durations=10', 'tools/suite.sh --nome martello --attendi -q'].map(s)).toEqual(Array(5).fill(true))
   expect(['npm test', 'npm test -- -t foo', 'cargo test --release', 'cargo build --release -q'].map(c => semplice(c, npm)))
     .toEqual([true, true, true, true])
+})
+
+// 0.3.1: semplice più largo per i timeout espliciti riscritti in auto mode.
+test('0.3.1 semplice: variabili in cd e assegnazioni, redirezioni sicure, più righe', () => {
+  const s = (c: string) => semplice(c, POKE)
+  expect(['cd $W && pytest -q > out 2>&1', 'W=$PWD; cd $W && pytest -q > out.txt 2>&1', 'cd "${W}/sub" && pytest',
+    'cd $W\npytest -q 2>&1 | tail -5', 'pytest > out.txt', 'pytest >> log/run.log 2>&1', 'pytest >out 2>/dev/null',
+    'pytest 2> err.txt', 'pytest 1>out', 'w=/tmp/x; cd $w && pytest', 'W="/a b"\ncd "$W"\npytest -x > o 2>&1',
+    'CI=1; pytest'].map(s)).toEqual(Array(12).fill(true))
+})
+
+test('0.3.1 semplice: no a variabili negli argomenti, bersagli pericolosi, assegnazioni che cambiano l\'esecuzione', () => {
+  const s = (c: string) => semplice(c, POKE)
+  expect(['pytest $ARGS', 'pytest -k "$K"', 'pytest > $OUT', 'pytest > ../x', 'pytest > /etc/passwd', 'pytest > .zshrc',
+    'pytest > a/.git/hooks/pre-commit', 'PATH=/tmp; pytest', 'PYTHONPATH=x; pytest', 'LD_PRELOAD=x; pytest', 'cd ${W:-/}; pytest',
+    'cd $1 && pytest', 'cd $(pwd) && pytest', 'pytest &> out', 'W=$(curl x); cd $W && pytest', 'export W=1; pytest',
+    'cd $W && pytest\nrm -rf x', 'pytest > -p', 'pytest >', 'pytest > out > /etc/x', 'IFS=x; pytest', 'cd $$ && pytest',
+    'X=1 Y=$Z; pytest $X'].map(s)).toEqual(Array(23).fill(false))
+})
+
+test('0.3.1 correggi: con un timeout predefinito abbastanza alto non tocca il timeout assente', () => {
+  const cfg = POKE
+  expect(correggi({ command: 'pytest -q' }, cfg, 600000)).toBe(undefined)
+  expect(correggi({ command: 'pytest -q' }, cfg, 120000)).toEqual({ timeout: 600000 })
+  expect(correggi({ command: 'pytest -q' }, cfg)).toEqual({ timeout: 600000 })
+  expect(correggi({ command: 'pytest -q', timeout: 300000 }, cfg, 600000)).toEqual({ timeout: 600000 })
 })

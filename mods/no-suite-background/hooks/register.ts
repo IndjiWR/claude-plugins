@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { configurazione, correggi, decidi, dirComando, etaLeggibile, leggiPs, occupanti, prenotati, pulisci, quantiPesanti, semplice } from './logica'
+import { configurazione, correggi, decidi, dirComando, etaLeggibile, leggiPs, occupanti, prenotati, pulisci, quantiPesanti, semplice, timeoutPredefinito } from './logica'
 import type { Config, Prenotazione, Processo } from './logica'
 
 // Suite e build (comandi pesanti) solo in primo piano, con timeout 600000, uno per Bash: in background, o in primo
@@ -8,7 +8,8 @@ import type { Config, Prenotazione, Processo } from './logica'
 // assente o basso lo corregge (next con l'input riscritto, l'updatedInput delle mod), con `riassunto` anche pytest.
 // Se un comando pesante gira già nello stesso albero git, o sulla macchina ce ne sono già maxSullaMacchina, il comando
 // aspetta il suo turno (coda FIFO su file, al più attesaMassima secondi) invece di essere rifiutato. In auto mode il
-// classificatore non giudica un input riscritto: per un comando pesante semplice la mod risponde allow (tool.judge).
+// classificatore non giudica un input riscritto: per un comando pesante semplice la mod risponde allow (tool.judge);
+// con BASH_DEFAULT_TIMEOUT_MS sufficiente un timeout assente non si riscrive.
 // Port di pokefootleague/.claude/hooks/no-suite-background.py.
 // Attiva solo nei progetti con .claude/no-suite-background.json (anche `{}`): vedi README.
 
@@ -119,7 +120,9 @@ export const register: Register = on => {
     if (cfg === null) return next(e)
     const motivo = decidi(e, cfg)
     if (motivo) return { deny: `${$.plugin.name}: ${motivo}` }
-    const modifica = correggi(e, cfg)
+    // Con BASH_DEFAULT_TIMEOUT_MS nelle settings il timeout assente non si riscrive (0.3.1).
+    const predefinito = timeoutPredefinito(await $.env.get('BASH_DEFAULT_TIMEOUT_MS').catch(() => undefined))
+    const modifica = correggi(e, cfg, predefinito)
     const finale = modifica ? { ...e, ...modifica } : e
     // In auto mode il judge di questa chiamata scatta dentro next: l'id vale solo per la sua durata.
     const id = modifica && typeof e.tool_use_id === 'string' && typeof e.command === 'string' && semplice(e.command, cfg)

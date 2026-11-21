@@ -248,16 +248,26 @@ function riassunto(cmd: string, cfg: Config): string | undefined {
 
 /** I campi da riscrivere in un Bash con un solo comando pesante in primo piano: `timeout` portato a `timeoutMinimo`
  * se assente o più basso; con `riassunto`, `command` con `-q --tb=line`. undefined se non c'è niente da cambiare. */
-export function correggi(input: InputBash, cfg: Config): { timeout?: number; command?: string } | undefined {
+export function correggi(input: InputBash, cfg: Config, predefinito?: number): { timeout?: number; command?: string } | undefined {
   if (typeof input.command !== 'string' || decidi(input, cfg) !== undefined) return undefined
   if (quantiPesanti(input.command, cfg) !== 1) return undefined
   const out: { timeout?: number; command?: string } = {}
   const v = Number(input.timeout ?? 0)
   const t = Number.isFinite(v) ? Math.trunc(v) : 0
-  if (t < cfg.timeoutMinimo) out.timeout = cfg.timeoutMinimo
+  // Timeout assente e predefinito delle settings (BASH_DEFAULT_TIMEOUT_MS) già sufficiente: niente riscrittura, così
+  // in auto mode il classificatore giudica il comando vero.
+  const coperto = (input.timeout === undefined || input.timeout === null) && (predefinito ?? 0) >= cfg.timeoutMinimo
+  if (t < cfg.timeoutMinimo && !coperto) out.timeout = cfg.timeoutMinimo
   const c = cfg.riassunto ? riassunto(input.command, cfg) : undefined
   if (c !== undefined) out.command = c
   return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** Il valore di BASH_DEFAULT_TIMEOUT_MS: un intero positivo, altrimenti undefined. */
+export function timeoutPredefinito(v: string | undefined): number | undefined {
+  if (v === undefined || !/^\s*\d+\s*$/.test(v)) return undefined
+  const n = Number(v)
+  return n > 0 ? n : undefined
 }
 
 export function etaSecondi(e: string): number {
@@ -451,22 +461,55 @@ function filtro(t: readonly string[]): boolean {
   }
 }
 
-/** Il comando è un solo comando pesante (letto da `pesanteStretto`), al più con `cd <dir>` e filtri in pipe
- * (`filtro`), uniti da `&&`, `||`, `;`, `|`: niente `$`, graffe, sostituzioni, redirezioni (salvo `2>&1`),
- * background, sottoshell, a capo. Solo su questi, riscritti dalla mod, il hook `tool.judge` risponde allow al posto
- * del classificatore dell'auto mode. */
+// Variabili: solo `$NOME` / `${NOME}`; assegnabili a sé solo nomi che non cambiano l'esecuzione (una maiuscola o
+// minuscoli, oltre a VARIABILI); bersagli delle redirezioni: /dev/null o percorsi relativi senza `..` né nascosti.
+const RIF_VAR = /\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/g
+const ASSEGNABILE = /^([A-Z]|[a-z_][a-z0-9_]*)$/
+const BERSAGLIO = /^\/dev\/null$|^\w[\w.-]*(\/\w[\w.-]*)*$/
+const REDIR = /^[12]?>>?/
+
+/** Toglie da una parte le redirezioni dell'uscita (`>`, `>>`, `1>`, `2>`, `2>>`, staccate o attaccate) con un
+ * bersaglio sicuro; null se una redirezione o un `>` non torna. */
+function senzaRedirezioni(t: readonly string[]): string[] | null {
+  const out: string[] = []
+  for (let k = 0; k < t.length; k++) {
+    const x = t[k] ?? ''
+    const m = REDIR.exec(x)
+    if (!m) {
+      if (x.includes('>')) return null
+      out.push(x)
+      continue
+    }
+    const resto = x.slice(m[0].length)
+    const bersaglio = resto !== '' ? resto : t[++k]
+    if (bersaglio === undefined || !BERSAGLIO.test(bersaglio)) return null
+  }
+  return out
+}
+
+/** Il comando è un solo comando pesante (letto da `pesanteStretto`), al più con `cd <dir>`, assegnazioni a sé
+ * (`W=…`) e filtri in pipe (`filtro`), uniti da `&&`, `||`, `;`, `|` o a capo, con redirezioni dell'uscita verso
+ * bersagli sicuri e `$NOME` solo in `cd` e nelle assegnazioni: niente sostituzioni, `<`, background, sottoshell.
+ * Solo su questi, riscritti dalla mod, il hook `tool.judge` risponde allow al posto del classificatore dell'auto mode. */
 export function semplice(cmd: string, cfg: Config): boolean {
-  const s = cmd.replace(/(^|\s)2>&1(?=\s|$)/g, ' ')
-  if (/[<>`\n\\${}]/.test(s)) return false
+  const s = cmd.replace(/(^|\s)2>&1(?=\s|$)/g, ' ').replace(/\n\s*/g, '\n').trim()
+  if (/[<`\\]/.test(s) || /[${}]/.test(s.replace(RIF_VAR, ''))) return false
   const tok = tokenizza(s, true)
   if (tok === null) return false
   let pesanti = 0
   let parte: string[] = []
   const chiudi = (): boolean => {
-    const t = parte
+    const t = senzaRedirezioni(parte)
     parte = []
-    if (t.length === 0) return false
+    if (t === null || t.length === 0) return false
     if (t[0] === 'cd') return t.length <= 2
+    if (t.every(x => ASSEGNA.test(x))) {
+      return t.every(x => {
+        const n = x.split('=')[0] ?? ''
+        return ASSEGNABILE.test(n) || VARIABILI.has(n)
+      })
+    }
+    if (t.some(x => x.includes('$'))) return false
     if (filtro(t)) return true
     if (!pesanteStretto(t, cfg)) return false
     pesanti++

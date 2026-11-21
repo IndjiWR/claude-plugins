@@ -27,6 +27,16 @@ Un errore nella lettura dei processi (`ps`, `lsof`, `git`) o dei file della coda
 Con `timeout` assente, non numerico o sotto `timeoutMinimo` non rifiuta più (dalla 0.2.0): riscrive l'input del Bash
 con `timeout` = `timeoutMinimo` e lo lascia passare, senza far perdere un turno all'agente.
 
+**Consigliato (dalla 0.3.1):** `BASH_DEFAULT_TIMEOUT_MS` almeno pari a `timeoutMinimo` nelle settings del progetto,
+
+```json
+{ "env": { "BASH_DEFAULT_TIMEOUT_MS": "600000" } }
+```
+
+Con la variabile un Bash **senza** `timeout` non si riscrive più: il timeout predefinito basta già (prova del 21/11:
+un comando di 150 s resta in primo piano, senza la variabile va in background a 120 s) e in auto mode il
+classificatore giudica il comando vero. Un `timeout` esplicito più basso si riscrive come prima.
+
 ### Auto mode
 
 In auto mode il classificatore non giudica un Bash il cui input è stato cambiato da un hook: lo nega con «a hook
@@ -43,8 +53,17 @@ verdetto sotto è `ask`, cioè nessun verdetto; un `deny` resta). Semplice vuol 
   `-p no:…`); per gli script con un percorso anche `--parola` senza valore, salvo nomi con config, shell, plugin, rc,
   preload, require;
 - al più `cd <dir>` e filtri in pipe che leggono solo l'input: `tail`/`head` (`-n N`, `-N`), `wc -l`, `grep` con un
-  solo motivo e opzioni di sola lettura, `echo`, `true`; uniti da `&&`, `||`, `;`, `|`;
-- niente `$`, graffe, backtick, redirezioni (salvo `2>&1`), `&`, sottoshell, a capo.
+  solo motivo e opzioni di sola lettura, `echo`, `true`; uniti da `&&`, `||`, `;`, `|` o a capo (dalla 0.3.1);
+- dalla 0.3.1 anche assegnazioni a sé (`W=$PWD;`) con nomi di una lettera maiuscola o minuscoli (mai `PATH`,
+  `PYTHONPATH`, `LD_*` & co.); `$NOME` / `${NOME}` solo nell'argomento di `cd` e nei valori di queste assegnazioni;
+  redirezioni dell'uscita `>`, `>>`, `1>`, `2>`, `2>>` verso `/dev/null` o un percorso relativo senza `..`, `$` né
+  componenti nascosti (`cd $W && pytest -q > out 2>&1`);
+- niente `$(…)`, `${x:-…}`, `$1`, graffe, backtick, `<`, `&>`, `&`, sottoshell, variabili negli argomenti del comando
+  pesante.
+
+Un comando con il solo `timeout` cambiato ma non semplice resta al classificatore (rilancio): la mod non risponde
+`allow` su comandi arbitrari solo perché contengono un `pytest`, perché il classificatore non li ha visti. Con
+`BASH_DEFAULT_TIMEOUT_MS` nelle settings il caso più comune (nessun `timeout`) non si pone.
 
 Ogni altro comando resta al classificatore: il motore chiede all'agente di rilanciarlo con l'input già corretto.
 Limite: un comando pesante esegue per natura codice del progetto (`conftest.py`, script di `package.json`,
