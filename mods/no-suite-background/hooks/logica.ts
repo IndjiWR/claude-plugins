@@ -454,18 +454,20 @@ function filtro(t: readonly string[]): boolean {
         else if (a.startsWith('-')) return false
         else posizionali++
       }
-      return posizionali <= 1 // solo il motivo: un file da leggere no
+      // solo il motivo: un file da leggere no (con -e il motivo è già dato)
+      return posizionali <= (r.some(a => a === '-e') ? 0 : 1)
     }
     default:
       return false
   }
 }
 
-// Variabili: solo `$NOME` / `${NOME}`; assegnabili a sé solo nomi che non cambiano l'esecuzione (una maiuscola o
-// minuscoli, oltre a VARIABILI); bersagli delle redirezioni: /dev/null o percorsi relativi senza `..` né nascosti.
+// Variabili: solo `$NOME` / `${NOME}`; assegnabili a sé solo nomi di una maiuscola (in zsh `path`, `cdpath`… sono
+// legati a PATH e CDPATH) oltre a VARIABILI; bersagli delle redirezioni: /dev/null o file `.txt`, `.log`, `.out` (o
+// `out`) relativi senza `..` né componenti nascosti, che nessun comando pesante carica o esegue.
 const RIF_VAR = /\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/g
-const ASSEGNABILE = /^([A-Z]|[a-z_][a-z0-9_]*)$/
-const BERSAGLIO = /^\/dev\/null$|^\w[\w.-]*(\/\w[\w.-]*)*$/
+const ASSEGNABILE = /^[A-Z]$/
+const BERSAGLIO = /^\/dev\/null$|^(\w[\w.-]*\/)*(out|\w[\w.-]*\.(txt|log|out))$/
 const REDIR = /^[12]?>>?/
 
 /** Toglie da una parte le redirezioni dell'uscita (`>`, `>>`, `1>`, `2>`, `2>>`, staccate o attaccate) con un
@@ -493,7 +495,7 @@ function senzaRedirezioni(t: readonly string[]): string[] | null {
  * Solo su questi, riscritti dalla mod, il hook `tool.judge` risponde allow al posto del classificatore dell'auto mode. */
 export function semplice(cmd: string, cfg: Config): boolean {
   const s = cmd.replace(/(^|\s)2>&1(?=\s|$)/g, ' ').replace(/\n\s*/g, '\n').trim()
-  if (/[<`\\]/.test(s) || /[${}]/.test(s.replace(RIF_VAR, ''))) return false
+  if (cmd.includes("\r") || /[<`\\]/.test(s) || /[${}]/.test(s.replace(RIF_VAR, ''))) return false
   const tok = tokenizza(s, true)
   if (tok === null) return false
   let pesanti = 0

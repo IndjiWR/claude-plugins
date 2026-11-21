@@ -336,7 +336,7 @@ test('0.3.1 semplice: variabili in cd e assegnazioni, redirezioni sicure, più r
   const s = (c: string) => semplice(c, POKE)
   expect(['cd $W && pytest -q > out 2>&1', 'W=$PWD; cd $W && pytest -q > out.txt 2>&1', 'cd "${W}/sub" && pytest',
     'cd $W\npytest -q 2>&1 | tail -5', 'pytest > out.txt', 'pytest >> log/run.log 2>&1', 'pytest >out 2>/dev/null',
-    'pytest 2> err.txt', 'pytest 1>out', 'w=/tmp/x; cd $w && pytest', 'W="/a b"\ncd "$W"\npytest -x > o 2>&1',
+    'pytest 2> err.txt', 'pytest 1>out', 'W=/tmp/x; cd $W && pytest', 'W="/a b"\ncd "$W"\npytest -x > o.log 2>&1',
     'CI=1; pytest'].map(s)).toEqual(Array(12).fill(true))
 })
 
@@ -346,7 +346,11 @@ test('0.3.1 semplice: no a variabili negli argomenti, bersagli pericolosi, asseg
     'pytest > a/.git/hooks/pre-commit', 'PATH=/tmp; pytest', 'PYTHONPATH=x; pytest', 'LD_PRELOAD=x; pytest', 'cd ${W:-/}; pytest',
     'cd $1 && pytest', 'cd $(pwd) && pytest', 'pytest &> out', 'W=$(curl x); cd $W && pytest', 'export W=1; pytest',
     'cd $W && pytest\nrm -rf x', 'pytest > -p', 'pytest >', 'pytest > out > /etc/x', 'IFS=x; pytest', 'cd $$ && pytest',
-    'X=1 Y=$Z; pytest $X'].map(s)).toEqual(Array(23).fill(false))
+    'X=1 Y=$Z; pytest $X',
+    // review 0.3.1: file che il comando pesante carica, nomi legati di zsh, grep -e con un file
+    "echo 'import os' > conftest.py; pytest", 'echo x > tools/suite.sh && tools/suite.sh', 'echo x >> pytest.ini; pytest',
+    'pytest > conftest.py', 'pytest > src/x.py', 'path=/tmp/evil; pytest', 'cdpath=/tmp/e; cd foo; pytest', 'w=1; pytest',
+    'WT=x; pytest', 'grep -e . /etc/passwd; pytest', 'pytest\r', 'pytest >| out', 'pytest > o; pytest'].map(s)).toEqual(Array(36).fill(false))
 })
 
 test('0.3.1 correggi: con un timeout predefinito abbastanza alto non tocca il timeout assente', () => {

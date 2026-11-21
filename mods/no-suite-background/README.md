@@ -53,11 +53,12 @@ verdetto sotto è `ask`, cioè nessun verdetto; un `deny` resta). Semplice vuol 
   `-p no:…`); per gli script con un percorso anche `--parola` senza valore, salvo nomi con config, shell, plugin, rc,
   preload, require;
 - al più `cd <dir>` e filtri in pipe che leggono solo l'input: `tail`/`head` (`-n N`, `-N`), `wc -l`, `grep` con un
-  solo motivo e opzioni di sola lettura, `echo`, `true`; uniti da `&&`, `||`, `;`, `|` o a capo (dalla 0.3.1);
-- dalla 0.3.1 anche assegnazioni a sé (`W=$PWD;`) con nomi di una lettera maiuscola o minuscoli (mai `PATH`,
-  `PYTHONPATH`, `LD_*` & co.); `$NOME` / `${NOME}` solo nell'argomento di `cd` e nei valori di queste assegnazioni;
-  redirezioni dell'uscita `>`, `>>`, `1>`, `2>`, `2>>` verso `/dev/null` o un percorso relativo senza `..`, `$` né
-  componenti nascosti (`cd $W && pytest -q > out 2>&1`);
+  solo motivo e opzioni di sola lettura, `echo`, `true` (`grep -e motivo` senza file); uniti da `&&`, `||`, `;`, `|` o a capo (dalla 0.3.1);
+- dalla 0.3.1 anche assegnazioni a sé (`W=$PWD;`) con nomi di una sola lettera maiuscola (mai `PATH`, `LD_*`, né i
+  minuscoli che zsh lega a `PATH`/`CDPATH`, come `path`); `$NOME` / `${NOME}` solo nell'argomento di `cd` e nei valori
+  di queste assegnazioni; redirezioni dell'uscita `>`, `>>`, `1>`, `2>`, `2>>` verso `/dev/null` o un file `out`,
+  `*.txt`, `*.log`, `*.out` con percorso relativo senza `..` né componenti nascosti, che nessun comando pesante carica
+  (`cd $W && pytest -q > out 2>&1`; non `> conftest.py`);
 - niente `$(…)`, `${x:-…}`, `$1`, graffe, backtick, `<`, `&>`, `&`, sottoshell, variabili negli argomenti del comando
   pesante.
 

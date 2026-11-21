@@ -121,7 +121,10 @@ export const register: Register = on => {
     const motivo = decidi(e, cfg)
     if (motivo) return { deny: `${$.plugin.name}: ${motivo}` }
     // Con BASH_DEFAULT_TIMEOUT_MS nelle settings il timeout assente non si riscrive (0.3.1).
-    const predefinito = timeoutPredefinito(await $.env.get('BASH_DEFAULT_TIMEOUT_MS').catch(() => undefined))
+    // Il predefinito vale al più BASH_MAX_TIMEOUT_MS (600000 se assente), come nel Bash.
+    const massimo = timeoutPredefinito(await $.env.get('BASH_MAX_TIMEOUT_MS').catch(() => undefined)) ?? 600000
+    const pred = timeoutPredefinito(await $.env.get('BASH_DEFAULT_TIMEOUT_MS').catch(() => undefined))
+    const predefinito = pred === undefined ? undefined : Math.min(pred, massimo)
     const modifica = correggi(e, cfg, predefinito)
     const finale = modifica ? { ...e, ...modifica } : e
     // In auto mode il judge di questa chiamata scatta dentro next: l'id vale solo per la sua durata.

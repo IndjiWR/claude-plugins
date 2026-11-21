@@ -376,6 +376,13 @@ test('0.3.1 auto mode: con BASH_DEFAULT_TIMEOUT_MS=600000 un timeout assente non
   expect(s.input[1]?.timeout).toBe(600000)
 })
 
+test('0.3.1 review: BASH_MAX_TIMEOUT_MS più basso limita il predefinito', async ($, on) => {
+  const s = world(on, { BASH_DEFAULT_TIMEOUT_MS: '600000', BASH_MAX_TIMEOUT_MS: '300000' })
+  s.files.set(CONFIG, POKE)
+  await esito($, 'pytest -q', {})
+  expect(s.input[0]?.timeout).toBe(600000)
+})
+
 test('0.3.1 auto mode: BASH_DEFAULT_TIMEOUT_MS basso o non numerico non conta', async ($, on) => {
   const s = world(on, { BASH_DEFAULT_TIMEOUT_MS: 'tanto' })
   s.files.set(CONFIG, POKE)
