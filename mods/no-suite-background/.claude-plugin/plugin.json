@@ -1,6 +1,6 @@
 {
   "name": "no-suite-background",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Suite e build solo in primo piano, una per Bash, con timeout 600000 impostato da sola e una coda se la macchina è piena: niente agenti fermi ad aspettare. Compatibile con l'auto mode. Attiva nei progetti con .claude/no-suite-background.json.",
   "author": {
     "name": "Indji"

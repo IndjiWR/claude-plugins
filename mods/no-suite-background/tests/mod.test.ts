@@ -14,8 +14,8 @@ const CODA = '/home/u/.claude/no-suite-background/coda'
 type Proc = { pid: number; ppid: number; etime: string; cwd: string; cmd: string }
 
 // Il mondo sotto la mod: un progetto in /p, i file, i processi (ps, lsof, git) e il fondo di tool.call.
-const world = (on: On) => {
-  mock.env(on, { HOME: '/home/u' })
+const world = (on: On, env: Record<string, string> = {}) => {
+  mock.env(on, { HOME: '/home/u', ...env })
   const clock = mock.clock(on, { now: 1_000_000 })
   const state = {
     clock,
@@ -362,6 +362,42 @@ test('auto mode: comando complesso riscritto o non riscritto -> verdetto sotto; 
   expect(s.verdetti).toEqual(['ask', 'ask', 'allow'])
   const dopo = await $.tool.judge({ tool: 'Bash', input: { command: 'pytest -q' }, tool_use_id: s.ids[2] } as never)
   expect(dopo.decision).toBe('ask')
+})
+
+// 0.3.1: timeout predefinito dalle settings e semplice più largo.
+test('0.3.1 auto mode: con BASH_DEFAULT_TIMEOUT_MS=600000 un timeout assente non si riscrive', async ($, on) => {
+  const s = world(on, { BASH_DEFAULT_TIMEOUT_MS: '600000' })
+  s.judge$ = $
+  s.files.set(CONFIG, POKE)
+  expect(await esito($, 'pytest -q; git push', {})).toBe(undefined)
+  expect(s.input[0]?.timeout).toBe(undefined)
+  expect(s.verdetti).toEqual(['ask']) // nessuna riscrittura: decide il classificatore
+  expect(await esito($, 'pytest -q', { timeout: 300000 })).toBe(undefined)
+  expect(s.input[1]?.timeout).toBe(600000)
+})
+
+test('0.3.1 review: BASH_MAX_TIMEOUT_MS più basso limita il predefinito', async ($, on) => {
+  const s = world(on, { BASH_DEFAULT_TIMEOUT_MS: '600000', BASH_MAX_TIMEOUT_MS: '300000' })
+  s.files.set(CONFIG, POKE)
+  await esito($, 'pytest -q', {})
+  expect(s.input[0]?.timeout).toBe(600000)
+})
+
+test('0.3.1 auto mode: BASH_DEFAULT_TIMEOUT_MS basso o non numerico non conta', async ($, on) => {
+  const s = world(on, { BASH_DEFAULT_TIMEOUT_MS: 'tanto' })
+  s.files.set(CONFIG, POKE)
+  await esito($, 'pytest -q', {})
+  expect(s.input[0]?.timeout).toBe(600000)
+})
+
+test('0.3.1 auto mode: cd $W && pytest > out 2>&1 e comando su più righe, timeout riscritto -> allow', async ($, on) => {
+  const s = world(on)
+  s.judge$ = $
+  s.files.set(CONFIG, POKE)
+  await esito($, 'cd $W && pytest -q > out 2>&1', { timeout: 300000 })
+  await esito($, 'W=/w/a\ncd $W\npytest -x 2>&1 | tail -5', {})
+  expect(s.input.map(i => i.timeout)).toEqual([600000, 600000])
+  expect(s.verdetti).toEqual(['allow', 'allow'])
 })
 
 test('auto mode: un verdetto deny sotto resta deny', async ($, on) => {
