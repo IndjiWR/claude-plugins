@@ -10,6 +10,12 @@ Ricevi soltanto il percorso di un file di handoff, scritto perché un'altra sess
 
 Leggi il file. Puoi usare Read, Glob e Grep per controllare che i file, le cartelle e i comandi che cita esistano davvero. Non modificare nulla.
 
+Regole degli strumenti (ogni errore costa un giro):
+- Hai solo Read, Glob e Grep: niente Bash, nemmeno per `git` o `ls`. Lo stato git si legge con Read (`.git/HEAD`, `.git/refs/heads/<branch>`; in un worktree `.git` è un file che indica la cartella vera).
+- Glob: un pattern per chiamata, al più un gruppo di graffe senza graffe dentro (`src/{a,b}.ts` sì, `{src/{a,b},lib}/*` no); per più gruppi fai più chiamate.
+- Grep: solo i parametri del suo schema (`pattern`, `path`, `glob`, `type`, `output_mode`, `-i`, `-n`, `-A`, `-B`, `-C`, `multiline`, `head_limit`, `offset`), con `head_limit` e `offset` numeri interi senza virgolette; nessun altro parametro.
+- Prima di leggere un percorso controlla che esista con Glob sul percorso esatto; se non c'è, è una lacuna (punto 4), non un errore da riprovare.
+
 Controlla questi punti; ogni punto che non passa va in LACUNE, con cosa aggiungere:
 
 1. **Autosufficiente**: si capisce senza la conversazione precedente; niente rimandi a "sopra", "prima", "quel file".
