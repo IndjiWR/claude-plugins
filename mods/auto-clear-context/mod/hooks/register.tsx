@@ -256,8 +256,9 @@ const orElse = <T,>(read: Promise<T>, fallback: T) => read.catch(() => fallback)
 
 const trimSlash = (path: string) => path.replace(/[\\/]+$/, '')
 
-// La radice del repo principale per radice di sessione (in cache): la cartella madre della git common dir,
+// La radice del repo principale per radice di sessione: la cartella madre della git common dir,
 // così un worktree legge e scrive gli handoff nel principale. Fuori da git, repo bare o errore: la root della sessione.
+// In cache solo un esito certo (exit 0, o 128 «not a git repository»): un errore o un timeout si riprova alla chiamata dopo.
 const mainRoots = new Map<string, Promise<string>>()
 const mainRootOf = ($: EngineInterface, root: string) => {
   const cached = mainRoots.get(root)
@@ -265,9 +266,11 @@ const mainRootOf = ($: EngineInterface, root: string) => {
   const found = (async () => {
     try {
       const run = await $.process.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, timeoutMs: 5000 })
+      if (run.exitCode !== 0 && run.exitCode !== 128) mainRoots.delete(root)
       const dir = trimSlash(run.stdout.trim().replace(/\\/g, '/'))
       return run.exitCode === 0 && dir.endsWith('/.git') && dir.length > 5 ? dir.slice(0, -5) : root
     } catch {
+      mainRoots.delete(root)
       return root
     }
   })()
@@ -451,7 +454,10 @@ const archiveResumed = async ($: EngineInterface, prompt: string) => {
   const found = resumedHandoff(prompt)
   if (found === undefined) return
   const { root } = await paths($)
-  const handoff = await readHandoff($, `${root}/${found.path}`)
+  const handoff =
+    found.absolute !== undefined
+      ? await readHandoff($, found.absolute)
+      : ((await readHandoff($, `${root}/${found.path}`)) ?? (await readOutside($, found.path, (await findAgent($, found.agentId))?.cwd)))
   if (handoff === undefined) return
   const resumed = { ...handoff, text: setFront(handoff.text, { status: 'resumed' }) }
   const archived = await archiveCopy($, resumed)
@@ -911,6 +917,11 @@ const warnHandoff = async ($: EngineInterface, owner: string, why: string) => {
   const wait = handoffWaits.get(owner)
   if (wait === undefined || wait.isWarned) return
   const info = owner === 'main' ? undefined : await findAgent($, owner)
+  // Un agente sparito dall'elenco o finito non consegnerà più: niente avviso.
+  if (owner !== 'main' && (info === undefined || ['completed', 'failed', 'killed'].includes(info.taskStatus ?? ''))) {
+    forgetWait(owner)
+    return
+  }
   const state = await handoffState($, wait.path, info?.cwd)
   if (state === 'ok') {
     forgetWait(owner)
@@ -957,7 +968,13 @@ const expectHandoff = ($: EngineInterface, owner: string, path: string) => {
 const checkHandoffAtEnd = async ($: EngineInterface, owner: string, answer: string) => {
   const wait = handoffWaits.get(owner)
   if (wait === undefined || wait.isWarned) return
-  if (/\bHANDOFF\b/.test(answer) || wait.isSkillRun || wait.isDue) await warnHandoff($, owner, 'fine turno')
+  const isAnnounced = /\bHANDOFF\b/.test(answer) || wait.isSkillRun
+  if (isAnnounced || wait.isDue) {
+    await warnHandoff($, owner, 'fine turno')
+    return
+  }
+  // Un subagent che chiude il compito senza handoff ha finito: non si attende più il suo file.
+  if (owner !== 'main' && (await findAgent($, owner))?.teammateId === undefined) forgetWait(owner)
 }
 
 // Le note durante il turno, dopo il risultato di un tool: a un agente la sua zona e la
@@ -1635,7 +1652,7 @@ export const register: Register = (on, options) => {
   on('session.end', ($, e, next) => {
     // Un handoff di pausa archiviato e non ancora allegato passa anche a un altro /clear prima del primo prompt.
     const carried = e.reason === 'clear' ? attachFor?.ready : undefined
-    if (e.reason === 'clear') forgetWait('main')
+    forgetWait('main')
     attachFor = e.reason === 'clear' ? { owner: e.sessionId, source: 'clear', ...(carried === undefined ? {} : { ready: carried }) } : undefined
     if (e.reason === 'clear' && isClearRequested && isPauseClear) {
       // Pausa: archivio subito (resta anche se il PC si spegne), nessuna ripresa; il primo prompt scritto lo allega.

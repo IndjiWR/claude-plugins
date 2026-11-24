@@ -32,6 +32,7 @@ test('agentZoneNote: teammate', () => {
   expect(note).toContain('status: ready')
   expect(note).toContain('agent: a7')
   expect(note).toContain('Non lanciare il validatore: lo fa la mod.')
+  expect(note).toContain(`test -s ${path}`)
   expect(agentZoneNote('teammate', 3, 190_000, main, path, 'general-purpose')).toContain('subito')
 })
 
@@ -39,6 +40,7 @@ test('agentZoneNote: subagent', () => {
   const note = agentZoneNote('subagent', 2, 160_000, main, path, 'Explore')
   expect(note).toContain(`HANDOFF ${path}`)
   expect(note).toContain('Explore')
+  expect(note).toContain(`test -s ${path}`)
   expect(note).toContain('status: ready')
   expect(agentZoneNote('subagent', 3, 190_000, main, path, 'Explore')).toContain('subito')
 })
@@ -96,7 +98,8 @@ test('isStale: scadenza in minuti, 0 la spegne', () => {
 test("resumedHandoff: percorso dell'handoff di un subagent ripreso", () => {
   const found = { path: '.claude/handoff/pending/s1--a7.md', agentId: 'a7' }
   expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1--a7.md (repo /x)")).toEqual(found)
-  expect(resumedHandoff("Riprendi dall'handoff /Users/x/p/.claude/handoff/pending/s1--a7.md (repo /x)")).toEqual(found)
+  expect(resumedHandoff("Riprendi dall'handoff /Users/x/p/.claude/handoff/pending/s1--a7.md (repo /x)")).toEqual({ ...found, absolute: '/Users/x/p/.claude/handoff/pending/s1--a7.md' })
+  expect(resumedHandoff("Riprendi dall'handoff C:/p/.claude/handoff/pending/s1--a7.md")?.absolute).toBe('C:/p/.claude/handoff/pending/s1--a7.md')
   expect(resumedHandoff("Riprendi dall'handoff .claude/handoff/pending/s1.md")).toBe(undefined)
   expect(resumedHandoff('Fai qualcosa di diverso')).toBe(undefined)
   expect(resumedHandoff('riprendi dall’handoff .claude/handoff/pending/s1--a7.md')).toEqual(found)

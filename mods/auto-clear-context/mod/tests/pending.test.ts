@@ -32,12 +32,17 @@ const world = (on: On, agents: object[] = []) => {
     commands: [] as string[],
     runs: [] as { argv: readonly string[]; cwd?: string }[],
     gitDir: `${MAIN}/.git`,
+    // Esiti delle prossime chiamate a git: un exit code o 'throw' (errore o timeout); poi exit 0.
+    gitExits: [] as (number | 'throw')[],
   }
   on('session.id', () => ({ value: 's1' }))
   on('session.root', () => ({ value: WT }))
   on('session.cwd', () => ({ value: WT }))
   on('process.run', (_, e) => {
     state.runs.push({ argv: e.argv, cwd: e.init?.cwd })
+    const exit = state.gitExits.shift() ?? 0
+    if (exit === 'throw') return { deny: 'timeout' }
+    if (exit !== 0) return { value: { exitCode: exit, stdout: '', stderr: 'fatal: not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 0, stdout: `${state.gitDir}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('session.usage', () => ({
@@ -75,6 +80,8 @@ const world = (on: On, agents: object[] = []) => {
   on('agent.spawn', () => ({ model: 'm' }))
   on('tool.call', () => ({ result: undefined, text: 'ok' }) as never)
   on('prompt.submit', (_, e) => ({ text: e.text }) as never)
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('ui.toast', () => ({ value: undefined }) as never)
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('turn.step', async function* () {
@@ -223,4 +230,81 @@ test('timer spento con handoffWaitSeconds 0', { options: { handoffWaitSeconds: 0
   await state.clock.advance(400_000)
   await settled()
   expect((await $.tool.call(bash())).context ?? []).toEqual([])
+})
+
+test('git in errore: il ripiego non resta in cache, la chiamata dopo rilegge git', async ($, on) => {
+  const state = world(on)
+  state.gitExits = ['throw']
+  const [note] = await mainNote($, state)
+  expect(state.runs.length).toBeGreaterThan(1)
+  expect(note).toContain(`${PENDING}/s1.md`)
+  state.files.set(`${PENDING}/s1.md`, VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})
+
+test('git con exit 128 (non è un repo): il ripiego resta in cache', async ($, on) => {
+  const state = world(on)
+  state.gitExits = [128]
+  const [note] = await mainNote($, state)
+  expect(note).toContain(`${WT_PENDING}/s1.md`)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.runs.length).toBe(1)
+})
+
+const subagent = () => [{ id: 'a1', type: 'Explore', description: 'x', status: 'running', cwd: WT }]
+
+test('subagent che finisce senza HANDOFF dopo la nota: nessun avviso al timer', async ($, on) => {
+  const state = world(on, subagent())
+  await agentNote($, state)
+  await $.turn.complete(agentDone('a1', 'fatto, ecco il report'))
+  await state.clock.advance(181_000)
+  await settled()
+  expect((await $.tool.call(bash())).context ?? []).toEqual([])
+  expect(state.sends).toEqual([])
+  expect(state.logs.some(line => line.includes('handoff atteso'))).toBe(false)
+})
+
+test('agente non più in elenco allo scadere del timer: nessun avviso', async ($, on) => {
+  const agents = teammate()
+  const state = world(on, agents)
+  await agentNote($, state)
+  await $.turn.complete(agentDone('a1'))
+  agents.splice(0)
+  await state.clock.advance(181_000)
+  await settled()
+  expect((await $.tool.call(bash())).context ?? []).toEqual([])
+  expect(state.sends).toEqual([])
+  expect(state.logs.some(line => line.includes('handoff atteso'))).toBe(false)
+})
+
+test('session.end non clear: annulla l attesa della principale', async ($, on) => {
+  const state = world(on)
+  await mainNote($, state)
+  await $.turn.complete(mainDone())
+  await $.session.end({ reason: 'other', sessionId: 's1' } as never)
+  await state.clock.advance(181_000)
+  await settled()
+  expect(state.logs.some(line => line.includes('handoff atteso'))).toBe(false)
+})
+
+const READY_A7 = '---\nstatus: ready\nagent: a7\n---\n# Handoff\n\nFare x.\n'
+const resume = (path: string) => ({ tool: 'Agent', subagent_type: 'general-purpose', description: 'ripresa', prompt: `Riprendi dall'handoff ${path}` }) as never
+
+test('ripresa da percorso assoluto nel worktree: segnato resumed', async ($, on) => {
+  const state = world(on)
+  state.files.set(`${WT_PENDING}/s1--a7.md`, READY_A7)
+  await $.tool.call(resume(`${WT_PENDING}/s1--a7.md`))
+  await settled()
+  expect(state.files.get(`${WT_PENDING}/s1--a7.md`)).toContain('status: resumed')
+})
+
+test('ripresa da percorso relativo con il file solo nel worktree: segnato resumed', async ($, on) => {
+  const state = world(on)
+  state.files.set(`${WT_PENDING}/s1--a7.md`, READY_A7)
+  await $.tool.call(resume('.claude/handoff/pending/s1--a7.md'))
+  await settled()
+  expect(state.files.get(`${WT_PENDING}/s1--a7.md`)).toContain('status: resumed')
 })
