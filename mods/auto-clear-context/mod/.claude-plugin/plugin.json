@@ -1,6 +1,6 @@
 {
   "name": "auto-clear-context",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Vicino alle soglie di contesto (morbida, dura, margine di sicurezza) Claude salva lo stato in un handoff validato; la mod esegue /clear e fa ripartire il lavoro nella sessione pulita.",
   "author": { "name": "Indji" },
   "types": "./types/index.d.ts",
@@ -64,6 +64,12 @@
       "title": "Stop degli agenti consegnati (minuti)",
       "description": "Minuti dopo cui un agente che ha consegnato il report ma resta attivo (shell o attesa in background) viene fermato con TaskStop, anche senza handoff. 0 lo spegne; con un clear rimandato vale sempre lo stop dopo 2 minuti.",
       "default": 5
+    },
+    "handoffWaitSeconds": {
+      "type": "number",
+      "title": "Attesa dell'handoff (secondi)",
+      "description": "Secondi dopo una nota di zona oltre i quali, se il file d'handoff manca o è vuoto e chi l'ha ricevuta è fermo, la mod avvisa una volta. 0 lo spegne.",
+      "default": 180
     }
   }
 }

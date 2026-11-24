@@ -119,13 +119,13 @@ const NEVER_POINTS = [
   "con una richiesta di permesso o una domanda all'utente in sospeso",
 ].join('; ')
 
-// L'handoff di una sessione, relativo alla root del progetto.
+// L'handoff di una sessione, relativo alla root del repo principale.
 const handoffPath = (session: string) => `${HANDOFF_DIR}/pending/${session}.md`
 
-// Come si arriva al /clear, con il file di handoff della sessione.
-const how = (session: string) =>
+// Come si arriva al /clear, con il percorso assoluto del file di handoff della sessione.
+const how = (path: string) =>
   [
-    `L'handoff lo prepara la skill auto-clear-context:handoff, che salva lo stato in ${handoffPath(session)} (il file di questa sessione) e lo fa validare da un subagent;`,
+    `L'handoff lo prepara la skill auto-clear-context:handoff, che salva lo stato in ${path} (il file di questa sessione, percorso assoluto nel repo principale) e lo fa validare da un subagent;`,
     "con l'handoff validato e nessun lavoro in background, a fine turno la mod esegue /clear e il lavoro riparte da solo nella sessione pulita.",
     `Percentuale e zona si leggono su richiesta con il tool ${CONTEXT_TOOL}.`,
   ].join(' ')
@@ -134,8 +134,8 @@ const how = (session: string) =>
 const levels = (limits: Limits, withMargin = false) => `${limits.soft}/${limits.hard}${withMargin ? `/${limits.margin}` : ''}%`
 
 // La nota che la mod allega quando il contesto entra in una zona.
-const zoneNote = (zone: ThresholdZone, percent: number, limits: Limits, autoCompact: number | undefined, session: string) => {
-  const steps = how(session)
+const zoneNote = (zone: ThresholdZone, percent: number, limits: Limits, autoCompact: number | undefined, path: string) => {
+  const steps = how(path)
   const seen = `La mod auto-clear-context rileva il contesto al ${percent}% della finestra`
   const levelsText = `soglie ${levels(limits)}, margine di sicurezza al ${limits.margin}%`
   if (zone === 3) {
@@ -254,10 +254,53 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 // In un .tsx `<T,>` distingue il generico da un tag JSX.
 const orElse = <T,>(read: Promise<T>, fallback: T) => read.catch(() => fallback)
 
+const trimSlash = (path: string) => path.replace(/[\\/]+$/, '')
+
+// La radice del repo principale per radice di sessione: la cartella madre della git common dir,
+// così un worktree legge e scrive gli handoff nel principale. Fuori da git, repo bare o errore: la root della sessione.
+// In cache solo un esito certo (exit 0, o 128 «not a git repository»): un errore o un timeout si riprova alla chiamata dopo.
+const mainRoots = new Map<string, Promise<string>>()
+const mainRootOf = ($: EngineInterface, root: string) => {
+  const cached = mainRoots.get(root)
+  if (cached !== undefined) return cached
+  const found = (async () => {
+    try {
+      const run = await $.process.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, timeoutMs: 5000 })
+      if (run.exitCode !== 0 && run.exitCode !== 128) mainRoots.delete(root)
+      const dir = trimSlash(run.stdout.trim().replace(/\\/g, '/'))
+      return run.exitCode === 0 && dir.endsWith('/.git') && dir.length > 5 ? dir.slice(0, -5) : root
+    } catch {
+      mainRoots.delete(root)
+      return root
+    }
+  })()
+  mainRoots.set(root, found)
+  return found
+}
+
 const paths = async ($: EngineInterface) => {
-  const root = (await $.session.root()).replace(/[\\/]+$/, '')
+  const sessionRoot = trimSlash(await $.session.root())
+  const root = await mainRootOf($, sessionRoot)
   const dir = `${root}/${HANDOFF_DIR}`
-  return { root, shared: `${dir}/pending.md`, archive: `${dir}/archive`, events: `${dir}/events.log` }
+  return { root, sessionRoot, shared: `${dir}/pending.md`, archive: `${dir}/archive`, events: `${dir}/events.log` }
+}
+
+// Le cartelle fuori dal repo principale dove un handoff può finire per errore: il cwd di un agente,
+// il cwd e la root della sessione (un worktree), ognuna una volta.
+const outsideRoots = async ($: EngineInterface, agentCwd?: string) => {
+  const { root, sessionRoot } = await paths($)
+  const cwd = await orElse($.session.cwd(), root)
+  const dirs = [agentCwd, typeof cwd === 'string' ? cwd : root, sessionRoot].map(dir => (dir === undefined ? '' : trimSlash(dir)))
+  return [...new Set(dirs)].filter(dir => dir !== '' && dir !== root)
+}
+
+// Un handoff trovato fuori dal repo principale: una riga di log per file e contenuto.
+const outsideLogged = new Set<string>()
+const logOutside = ($: EngineInterface, handoff: Handoff) => {
+  const key = `${handoff.path}:${handoff.id}`
+  if (outsideLogged.has(key)) return
+  outsideLogged.add(key)
+  log($, `handoff trovato fuori dal repo principale: ${handoff.path} (atteso in ${HANDOFF_DIR}/pending/ del principale)`)
 }
 
 // Le prime cifre dell'id, per distinguere le sessioni nel log condiviso.
@@ -342,7 +385,7 @@ const readHandoff = async ($: EngineInterface, path: string): Promise<Handoff | 
 // frontmatter è l'handoff di un agente: non fa mai il /clear della principale.
 const readOwnHandoff = async ($: EngineInterface, session: string): Promise<Handoff | undefined> => {
   const { root, shared } = await paths($)
-  const own = await readHandoff($, `${root}/${handoffPath(session)}`)
+  const own = (await readHandoff($, `${root}/${handoffPath(session)}`)) ?? (await readOutside($, handoffPath(session)))
   const isAgents = own?.agent !== undefined
   if (own !== undefined && !isAgents && (own.session === undefined || own.session === session)) return own
   if (own?.status === 'validated') {
@@ -353,6 +396,18 @@ const readOwnHandoff = async ($: EngineInterface, session: string): Promise<Hand
   if (old?.session === session && old.agent === undefined) return old
   if (old?.status === 'validated' && old.session === undefined) {
     reportOnce($, old, `${HANDOFF_DIR}/pending.md validato senza session nel frontmatter: non è di nessuna sessione, nessun /clear né ripresa (si riprende a mano)`)
+  }
+  return undefined
+}
+
+// Il file `relative` (sotto la radice) fuori dal repo principale, se c'è e non è vuoto; col log.
+const readOutside = async ($: EngineInterface, relative: string, agentCwd?: string) => {
+  for (const dir of await outsideRoots($, agentCwd)) {
+    const found = await readHandoff($, `${dir}/${relative}`)
+    if (found !== undefined) {
+      logOutside($, found)
+      return found
+    }
   }
   return undefined
 }
@@ -399,7 +454,14 @@ const archiveResumed = async ($: EngineInterface, prompt: string) => {
   const found = resumedHandoff(prompt)
   if (found === undefined) return
   const { root } = await paths($)
-  const handoff = await readHandoff($, `${root}/${found.path}`)
+  let handoff =
+    found.absolute !== undefined
+      ? await readHandoff($, found.absolute)
+      : ((await readHandoff($, `${root}/${found.path}`)) ?? (await readOutside($, found.path, (await findAgent($, found.agentId))?.cwd)))
+  // Il percorso assoluto nel principale che non c'è: il file può essere nel worktree o nel cwd dell'agente.
+  if (handoff === undefined && found.absolute?.startsWith(`${root}/`) === true) {
+    handoff = await readOutside($, found.absolute.slice(root.length + 1), (await findAgent($, found.agentId))?.cwd)
+  }
   if (handoff === undefined) return
   const resumed = { ...handoff, text: setFront(handoff.text, { status: 'resumed' }) }
   const archived = await archiveCopy($, resumed)
@@ -542,7 +604,7 @@ const readAutoCompact = async ($: EngineInterface) => {
 }
 
 const buildNote = async ($: EngineInterface, zone: ThresholdZone, percent: number, limits: Limits, session: string) =>
-  zoneNote(zone, percent, limits, zone === 3 ? await readAutoCompact($) : AUTO_COMPACT_PERCENT, session)
+  zoneNote(zone, percent, limits, zone === 3 ? await readAutoCompact($) : AUTO_COMPACT_PERCENT, `${(await paths($)).root}/${handoffPath(session)}`)
 
 const findAgent = async ($: EngineInterface, agentId: string): Promise<AgentInfo | undefined> =>
   (await orElse($.agent.list(), [] as readonly AgentInfo[])).find(agent => agent.id === agentId)
@@ -774,23 +836,28 @@ const describeOverrides = (settings: Settings, window: number | undefined) => {
   return `${field === 'threshold' ? 'Morbida' : 'Dura'} salvata dalla mod; in /config resta ${describeThreshold(settings.inConfig[field], window)}`
 }
 
-// Il percorso relativo alla root di un file sotto .claude/handoff/.
-const relativePath = (path: string) => {
-  const slashed = path.replace(/\\/g, '/')
-  const at = slashed.lastIndexOf(`${HANDOFF_DIR}/`)
-  return at < 0 ? path : slashed.slice(at)
-}
-
 // L'handoff di un agente si cerca per id (pending/*--<agentId>.md, il più recente non vuoto), non con l'id
 // della principale, che cambia a ogni /clear.
-const findAgentHandoff = async ($: EngineInterface, agentId: string): Promise<Handoff | undefined> => {
-  const { root } = await paths($)
+// Prima nel repo principale, poi fuori (cwd dell'agente, worktree della sessione), con una riga di log.
+const newestAgentHandoff = async ($: EngineInterface, root: string, agentId: string) => {
   const dir = `${root}/${HANDOFF_DIR}/pending`
   const entries = await orElse($.fs.list(dir), [])
   const [newest] = entries
     .filter(entry => entry.kind === 'file' && entry.size > 0 && entry.name.endsWith(`--${agentId}.md`))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
   return newest === undefined ? undefined : readHandoff($, `${dir}/${newest.name}`)
+}
+const findAgentHandoff = async ($: EngineInterface, agentId: string, agentCwd?: string): Promise<Handoff | undefined> => {
+  const inMain = await newestAgentHandoff($, (await paths($)).root, agentId)
+  if (inMain !== undefined) return inMain
+  for (const dir of await outsideRoots($, agentCwd)) {
+    const found = await newestAgentHandoff($, dir, agentId)
+    if (found !== undefined) {
+      logOutside($, found)
+      return found
+    }
+  }
+  return undefined
 }
 
 // Il modello d'handoff dalle fonti che usano la skill e il validatore, lette a ogni nota: niente copie che divergono.
@@ -813,11 +880,108 @@ const agentZoneContext = async ($: EngineInterface, agentId: string, configured:
   if (info === undefined) return undefined
   // Chiave e percorso per agente, non per sessione: la principale cambia id a ogni /clear.
   if (!(await markSignaled($, `agent:${agentId}`, zone))) return undefined
-  const path = agentPaths.get(agentId) ?? agentHandoffPath(await $.session.id(), agentId)
+  const path = agentPaths.get(agentId) ?? `${(await paths($)).root}/${agentHandoffPath(await $.session.id(), agentId)}`
   agentPaths.set(agentId, path)
+  expectHandoff($, agentId, path)
   const model = await agentModel($, agentId)
   log($, `agente ${short(agentId)} a ~${formatK(tokens)} token (${ZONE_NAMES[zone]}): nota di handoff${model === '' ? ', senza modello (skill o validatore illeggibili)' : ''}`)
   return agentZoneNote(kindOf(info), zone, tokens, limits, path, info.type, model)
+}
+
+// Attese di handoff: dopo una nota di zona, per chi l'ha ricevuta ('main' o l'id dell'agente), il file atteso.
+// A fine turno con HANDOFF (o dopo la skill handoff) e allo scadere di handoffWaitSeconds, se il file manca o è
+// vuoto, un avviso: una volta per nota. `isDue`: il timer è scaduto mentre il destinatario era in un turno.
+type HandoffWait = { path: string; isWarned: boolean; isDue: boolean; isSkillRun: boolean; timer?: Timer }
+const handoffWaits = new Map<string, HandoffWait>()
+let handoffWaitMs = 180_000
+
+// Lo stato del file atteso: 'ok' se c'è e non è vuoto (anche fuori dal principale, dove la mod lo recupera).
+const handoffState = async ($: EngineInterface, path: string, agentCwd?: string): Promise<'ok' | 'missing' | 'empty'> => {
+  const text = await orElse($.fs.read(path), undefined)
+  if (typeof text === 'string' && text.trim() !== '') return 'ok'
+  const { root } = await paths($)
+  if (path.startsWith(`${root}/`)) {
+    const relative = path.slice(root.length + 1)
+    for (const dir of await outsideRoots($, agentCwd)) {
+      const outside = await orElse($.fs.read(`${dir}/${relative}`), undefined)
+      if (typeof outside === 'string' && outside.trim() !== '') return 'ok'
+    }
+  }
+  return typeof text === 'string' ? 'empty' : 'missing'
+}
+
+const forgetWait = (owner: string) => {
+  handoffWaits.get(owner)?.timer?.cancel()
+  handoffWaits.delete(owner)
+}
+
+const isOwnerBusy = (owner: string) => (owner === 'main' ? isMainBusy : !endedAgents.has(owner))
+
+const warnHandoff = async ($: EngineInterface, owner: string, why: string) => {
+  const wait = handoffWaits.get(owner)
+  if (wait === undefined || wait.isWarned) return
+  const info = owner === 'main' ? undefined : await findAgent($, owner)
+  // Un agente sparito dall'elenco o finito non consegnerà più: niente avviso.
+  if (owner !== 'main' && (info === undefined || ['completed', 'failed', 'killed'].includes(info.taskStatus ?? ''))) {
+    forgetWait(owner)
+    return
+  }
+  const state = await handoffState($, wait.path, info?.cwd)
+  if (state === 'ok') {
+    forgetWait(owner)
+    return
+  }
+  wait.isWarned = true
+  wait.timer?.cancel()
+  wait.timer = undefined
+  const what = state === 'missing' ? "il file non c'è" : 'è vuoto'
+  const text = `auto-clear-context: handoff atteso in ${wait.path}, ma ${what}. Scrivilo lì (percorso assoluto nel repo principale) e verificalo con \`test -s ${wait.path}\` prima della riga finale.`
+  log($, `handoff atteso${owner === 'main' ? '' : ` dall'agente ${short(owner)}`} (${why}): ${wait.path}, ${what}`)
+  if (owner === 'main') {
+    leadNotes.push(text)
+    return
+  }
+  if (info !== undefined && kindOf(info) === 'teammate') {
+    const sent = await $.session.send({ to: { agentId: owner }, text }).then(
+      outcome => (outcome as { isDelivered?: boolean } | undefined)?.isDelivered !== false,
+      () => false,
+    )
+    if (sent) return
+  }
+  leadNotes.push(`${text.replace('auto-clear-context: ', `auto-clear-context: l'agente ${info?.description ?? owner} (${owner}) aveva una nota di handoff; `)} Se serve, diglielo tu.`)
+}
+
+// Una nota di zona partita verso `owner`: si attende il suo file. Una nota nuova per lo stesso file conserva
+// skill e timer già scaduto: si azzerano solo l'avviso e il timer.
+const expectHandoff = ($: EngineInterface, owner: string, path: string) => {
+  const old = handoffWaits.get(owner)
+  const kept = old?.path === path ? { isDue: old.isDue, isSkillRun: old.isSkillRun } : { isDue: false, isSkillRun: false }
+  forgetWait(owner)
+  const wait: HandoffWait = { path, isWarned: false, ...kept }
+  handoffWaits.set(owner, wait)
+  if (handoffWaitMs <= 0) return
+  wait.timer = $.clock.after(handoffWaitMs, () => {
+    wait.timer = undefined
+    if (handoffWaits.get(owner) !== wait) return
+    if (isOwnerBusy(owner)) {
+      wait.isDue = true
+      return
+    }
+    warnHandoff($, owner, 'attesa scaduta').catch((error: unknown) => log($, `handoff atteso non controllato: ${errorText(error)}`))
+  })
+}
+
+// Fine turno di `owner`: avviso se ha annunciato l'handoff (o usato la skill) o se il timer è scaduto nel turno.
+const checkHandoffAtEnd = async ($: EngineInterface, owner: string, answer: string) => {
+  const wait = handoffWaits.get(owner)
+  if (wait === undefined || wait.isWarned) return
+  const isAnnounced = /\bHANDOFF\b/.test(answer) || wait.isSkillRun
+  // Un subagent che chiude il compito senza handoff ha finito: non si attende più il suo file, anche col timer scaduto.
+  if (!isAnnounced && owner !== 'main' && (await findAgent($, owner))?.teammateId === undefined) {
+    forgetWait(owner)
+    return
+  }
+  if (isAnnounced || wait.isDue) await warnHandoff($, owner, 'fine turno')
 }
 
 // Le note durante il turno, dopo il risultato di un tool: a un agente la sua zona e la
@@ -846,6 +1010,7 @@ const turnNotes = async (
   if (!(await markSignaled($, session, zone))) return []
   if (pendingNote?.session === session && pendingNote.zone <= zone) pendingNote = undefined
   log($, `contesto al ${percent}% (${ZONE_NAMES[zone]}) durante il turno: segnalato a Claude`)
+  expectHandoff($, 'main', `${(await paths($)).root}/${handoffPath(session)}`)
   return [await buildNote($, zone, percent, limits, session)]
 }
 
@@ -857,7 +1022,7 @@ const refusalOf = (outcome: { deny?: string; isError?: boolean; text?: string })
 const handToLead = async ($: EngineInterface, agentId: string, name: string, handoff: Handoff, reason: string) => {
   handedToLead.add(handoff.id)
   log($, `teammate ${short(agentId)}: rilancio non riuscito (${reason}); istruzioni alla sessione principale, l'handoff resta in pending/`)
-  const text = leadFallback(name, relativePath(handoff.path), reason)
+  const text = leadFallback(name, handoff.path, reason)
   $.prompt.submit({ text }).then(
     submitted => {
       if (submitted.drop !== undefined) log($, `istruzioni di rilancio alla principale scartate: ${submitted.drop}`)
@@ -885,6 +1050,7 @@ const forgetAgent = (agentId: string) => {
   doneRounds.delete(agentId)
   checking.delete(agentId)
   agentPaths.delete(agentId)
+  forgetWait(agentId)
 }
 
 // Rilancio del teammate con l'handoff validato: TaskStop, poi $.agent.spawn con l'input originale dell'Agent
@@ -975,7 +1141,7 @@ const pauseAgent = async ($: EngineInterface, agentId: string, name: string, han
   if (refused !== undefined) {
     handedToLead.add(handoff.id)
     log($, `teammate ${short(agentId)} in pausa: TaskStop non riuscito (${refused}); istruzioni alla principale, l'handoff resta in pending/`)
-    $.prompt.submit({ text: leadPauseFallback(name, relativePath(handoff.path), refused) }).then(
+    $.prompt.submit({ text: leadPauseFallback(name, handoff.path, refused) }).then(
       submitted => {
         if (submitted.drop !== undefined) log($, `istruzioni di pausa alla principale scartate: ${submitted.drop}`)
       },
@@ -1006,7 +1172,7 @@ const checkTeammate = async ($: EngineInterface, agentId: string) => {
   try {
     const info = await findAgent($, agentId)
     if (info === undefined || kindOf(info) !== 'teammate') return
-    const handoff = await findAgentHandoff($, agentId)
+    const handoff = await findAgentHandoff($, agentId, info.cwd)
     // Handoff già validato e rilancio rimandato (il teammate era in lavoro): ora il turno è finito.
     if (handoff?.status === 'validated') return await restartAgent($, agentId, handoff, true)
     if (handoff?.status !== 'ready') return
@@ -1337,6 +1503,8 @@ export const register: Register = (on, options) => {
   agentsEnabled = options.agents !== false
   agentStaleMinutes = Math.min(Number(options.agentStaleMinutes ?? 30), MAX_STALE_MINUTES)
   const stopMinutes = Number(options.deliveredStopMinutes ?? 5)
+  const waitSeconds = Number(options.handoffWaitSeconds ?? 180)
+  handoffWaitMs = Number.isFinite(waitSeconds) ? Math.max(waitSeconds, 0) * 1000 : 180_000
   deliveredStopMinutes = Number.isFinite(stopMinutes) ? Math.min(Math.max(stopMinutes, 0), MAX_STALE_MINUTES) : 5
   const tokenOption = (value: unknown, fallback: number) => {
     const n = Number(value ?? fallback)
@@ -1429,6 +1597,7 @@ export const register: Register = (on, options) => {
       if (note.session === session && (await markSignaled($, session, note.zone))) {
         log($, `${ZONE_NAMES[note.zone]} segnalata a Claude insieme al prompt`)
         context.push(note.text)
+        expectHandoff($, 'main', `${(await paths($)).root}/${handoffPath(session)}`)
       }
     }
     return context.length === (e.context?.length ?? 0) ? next(e) : next({ ...e, context })
@@ -1457,7 +1626,10 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId !== undefined) {
       const agentId = e.agentId
-      if (!e.isAborted) endedAgents.add(agentId)
+      if (!e.isAborted) {
+        endedAgents.add(agentId)
+        await checkHandoffAtEnd($, agentId, e.answer).catch((error: unknown) => log($, `handoff atteso non controllato: ${errorText(error)}`))
+      }
       if (e.isAborted) {
         // Validatore annullato: si libera il teammate, il suo prossimo turno rilancia lo stesso giro.
         const job = validating.get(agentId)
@@ -1478,6 +1650,7 @@ export const register: Register = (on, options) => {
       return result
     }
     await watchDelivered($).catch((error: unknown) => log($, `agenti consegnati non controllati: ${errorText(error)}`))
+    if (!e.isAborted) await checkHandoffAtEnd($, 'main', e.answer).catch((error: unknown) => log($, `handoff atteso non controllato: ${errorText(error)}`))
     if (e.isAborted || isClearRequested) return result
     await tryClear($, 'fine turno della principale')
     return result
@@ -1486,6 +1659,7 @@ export const register: Register = (on, options) => {
   on('session.end', ($, e, next) => {
     // Un handoff di pausa archiviato e non ancora allegato passa anche a un altro /clear prima del primo prompt.
     const carried = e.reason === 'clear' ? attachFor?.ready : undefined
+    forgetWait('main')
     attachFor = e.reason === 'clear' ? { owner: e.sessionId, source: 'clear', ...(carried === undefined ? {} : { ready: carried }) } : undefined
     if (e.reason === 'clear' && isClearRequested && isPauseClear) {
       // Pausa: archivio subito (resta anche se il PC si spegne), nessuna ripresa; il primo prompt scritto lo allega.
@@ -1560,12 +1734,18 @@ export const register: Register = (on, options) => {
     await orElse(markSeen($, e.agentId), undefined)
     const result = await next(e)
     if (result.deny !== undefined || next.origin.plugin !== 'engine') return result
-    const call = e as { command?: unknown; run_in_background?: unknown }
+    const call = e as { command?: unknown; run_in_background?: unknown; skill?: unknown }
+    // La skill handoff si segna dopo le note: una nota nuova nello stesso tool.call non la perde.
+    const markSkill = () => {
+      if (e.tool !== 'Skill' || typeof call.skill !== 'string' || !call.skill.includes('handoff')) return
+      const wait = handoffWaits.get(e.agentId ?? 'main')
+      if (wait !== undefined) wait.isSkillRun = true
+    }
     if (e.agentId !== undefined && typeof call.command === 'string' && (call.run_in_background === true || e.tool === 'Monitor')) {
       backgroundCommands.set(e.agentId, call.command)
     }
     try {
-      const zoneNotes = await turnNotes($, e.agentId, configured, agentTokensLimits)
+      const zoneNotes = await turnNotes($, e.agentId, configured, agentTokensLimits).finally(markSkill)
       const notes = [...(e.agentId === undefined ? leadNotes.splice(0) : []), ...zoneNotes]
       return notes.length === 0 ? result : { ...result, context: [...(result.context ?? []), ...notes] }
     } catch (error) {

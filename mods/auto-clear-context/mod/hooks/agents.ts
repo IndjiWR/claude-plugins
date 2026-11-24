@@ -112,7 +112,7 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, 
       model === ''
         ? `Scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff (stato, decisioni, file toccati, prossimo passo, «Verifica alla ripresa»), con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`
         : `Scrivi l'handoff in ${path} con il modello qui sotto, tutte le sezioni obbligatorie, con nel frontmatter status: ready e agent: ${agentIdOf(path)}.`,
-      `Non lanciare il validatore: lo fa la mod. Poi chiudi il turno con la sola riga «HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo».`,
+      `Non lanciare il validatore: lo fa la mod. Prima della riga HANDOFF verifica il file con \`test -s ${path}\`. Poi chiudi il turno con la sola riga «HANDOFF ${path}: la mod valida e rilancia questo teammate, non riprendere da solo».`,
       'La mod ferma questo teammate e lo rilancia con lo stesso nome, tipo e modello, dandogli l\'handoff come prompt.',
       'Se invece il lavoro va fermato (chiusura, spegnimento del PC, stop chiesto dal lead o dall\'utente), aggiungi mode: pausa nel frontmatter: la mod valida l\'handoff, lo archivia e ferma il teammate senza rilanciarlo.',
     ].join(' ') + withModel(model)
@@ -125,6 +125,7 @@ export const agentZoneNote = (kind: AgentKind, zone: 1 | 2 | 3, tokens: number, 
     model === ''
       ? `Altrimenti scrivi l'handoff in ${path} nel formato della skill auto-clear-context:handoff, con status: ready e agent: ${agentIdOf(path)} nel frontmatter, e controllalo da solo sui punti del validatore (ripartire dal solo file: obiettivo, decisioni, file, prossimo passo, verifica alla ripresa, nessun riferimento alla conversazione).`
       : `Altrimenti scrivi l'handoff in ${path} con il modello qui sotto, tutte le sezioni obbligatorie, con status: ready e agent: ${agentIdOf(path)} nel frontmatter, e controllalo da solo sui punti del validatore elencati sotto.`,
+    `Prima della riga HANDOFF verifica il file con \`test -s ${path}\`.`,
     `La risposta finale è una sola riga per chi ti ha lanciato: HANDOFF ${path}: rilancia un subagent ${type} con prompt «Riprendi dall'handoff ${path}».`,
   ].join(' ') + withModel(model)
 }
@@ -201,8 +202,12 @@ export const isStale = (lastSeen: number, now: number, minutes: number): boolean
 
 // Il percorso e l'id dell'agente dell'handoff di un subagent in un prompt «Riprendi dall'handoff …»;
 // undefined se manca o se è l'handoff di una principale (nome file senza "--").
-export const resumedHandoff = (prompt: string): { path: string; agentId: string } | undefined => {
-  const path = /Riprendi dall['’]handoff\s+\S*?(\.claude\/handoff\/pending\/[^\s/]+\.md)/i.exec(prompt)?.[1]
+// Con un percorso assoluto nel prompt (Unix o Windows) anche `absolute`, il file da leggere.
+export const resumedHandoff = (prompt: string): { path: string; agentId: string; absolute?: string } | undefined => {
+  const match = /Riprendi dall['’]handoff\s+(\S*?(\.claude\/handoff\/pending\/[^\s/]+\.md))/i.exec(prompt)
+  const path = match?.[2]
   const agentId = path === undefined ? '' : agentIdOf(path)
-  return path !== undefined && agentId !== '' ? { path, agentId } : undefined
+  if (path === undefined || agentId === '') return undefined
+  const full = match?.[1] ?? ''
+  return /^(\/|[A-Za-z]:[\\/])/.test(full) ? { path, agentId, absolute: full } : { path, agentId }
 }
