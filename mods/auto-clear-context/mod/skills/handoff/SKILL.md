@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Salva lo stato del lavoro in .claude/handoff/pending/<id della sessione>.md, lo fa validare da un subagent fresco e lo segna come validato, così la mod auto-clear-context esegue /clear e fa ripartire il lavoro da solo. Da usare quando la mod segnala una zona di contesto (morbida, dura, margine di sicurezza) o quando l'utente chiede un handoff.
+description: Salva lo stato del lavoro in .claude/handoff/pending/<id della sessione>.md del repo principale, lo fa validare da un subagent fresco e lo segna come validato, così la mod auto-clear-context esegue /clear e fa ripartire il lavoro da solo. Da usare quando la mod segnala una zona di contesto (morbida, dura, margine di sicurezza) o quando l'utente chiede un handoff.
 ---
 
 # Handoff
@@ -14,14 +14,14 @@ description: Salva lo stato del lavoro in .claude/handoff/pending/<id della sess
 2. **Raccogli i fatti, non andare a memoria**: `git status --short`, `git rev-parse --abbrev-ref HEAD`, `git log --oneline -5` e l'esito dei comandi di test/build che citerai. Ciò che non hai verificato in questa sessione va in "Ipotesi da verificare", non in "Stato verificato".
 3. **Se sei un agente** (subagent o teammate: la nota della mod indica un file `…--<id agente>.md`), da qui segui la «Variante agente» in fondo, non i passi 3-6: il file `${CLAUDE_SESSION_ID}.md` è della sessione principale.
 
-   **Scrivi `.claude/handoff/pending/${CLAUDE_SESSION_ID}.md`** nella root del progetto, con il formato qui sotto (punta a 1.000-2.000 token, massimo 9.000 caratteri), `status: draft` e `session: ${CLAUDE_SESSION_ID}`.
+   **Scrivi `<radice>/.claude/handoff/pending/${CLAUDE_SESSION_ID}.md`**, dove `<radice>` è la radice del repo principale anche se lavori in un worktree: `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"` (fuori da git, la root del progetto). Usa il percorso assoluto; se la nota della mod ne indica uno, è quello. Usa il formato qui sotto (punta a 1.000-2.000 token, massimo 9.000 caratteri), `status: draft` e `session: ${CLAUDE_SESSION_ID}`.
    - È il file di questa sessione. Nella stessa cartella possono lavorare altre sessioni, ognuna con il suo, e la mod esegue /clear solo nella sessione che l'ha scritto e allega l'handoff alla sessione pulita che la segue.
    - Non scrivere in `.claude/handoff/pending.md` (il file condiviso delle versioni precedenti) né nel file di un'altra sessione.
    - Solo se il percorso qui sopra non contiene un id di sessione, usa quello dell'ultima nota di zona della mod e metti in `session` l'id che compare nel nome di quel file.
    - Se il progetto è un repo git, `.claude/handoff/` deve stare in `.git/info/exclude`; aggiungilo se manca. Niente commit né push di questi file.
 4. **Fallo validare** dall'agent `auto-clear-context:handoff-validator`, in foreground, con `model: sonnet` (l'effort low è nella sua definizione), passandogli **solo** il percorso assoluto del file. Confronta la sua ricostruzione con lo stato reale, correggi le lacune e rilancia. Al massimo 2 giri.
 5. **Segna l'handoff come validato** nel frontmatter: `status: validated`, `validated_at` (ISO 8601) e `rounds`; `session` resta com'è. Se è un handoff di **pausa** (spegnimento del PC, chiusura notturna, stop chiesto dall'utente) aggiungi `mode: pausa`: la mod esegue /clear e archivia l'handoff, ma non fa ripartire il lavoro.
-6. **Chiudi il turno con una sola riga** che nomina il file dell'handoff, senza altre azioni. A fine turno la mod esegue /clear, allega l'handoff alla sessione pulita e fa ripartire il lavoro (con `mode: pausa` resta fermo: l'handoff va in `.claude/handoff/archive/` e si allega al primo prompt dell'utente); se il /clear non arriva, la riga dice da quale file riprendere a mano.
+6. **Verifica il file con `test -s <percorso assoluto>`**: se fallisce (manca o è vuoto), riscrivilo e non annunciarlo. Poi **chiudi il turno con una sola riga** che nomina il file dell'handoff con il percorso assoluto, senza altre azioni. A fine turno la mod esegue /clear, allega l'handoff alla sessione pulita e fa ripartire il lavoro (con `mode: pausa` resta fermo: l'handoff va in `.claude/handoff/archive/` e si allega al primo prompt dell'utente); se il /clear non arriva, la riga dice da quale file riprendere a mano.
 
 ## Formato
 
@@ -108,8 +108,9 @@ mode: <solo per una pausa: "pausa"; altrimenti togli la riga>
 
 Vale quando la nota di zona arriva a un subagent o a un teammate (non alla sessione principale) e indica il percorso del file. Sostituisce i passi 3-6: un agente non scrive `${CLAUDE_SESSION_ID}.md` (è il file della principale; con `agent:` nel frontmatter la mod lo ignora).
 
-- **File**: quello della nota, `.claude/handoff/pending/<sessione>--<id agente>.md`, non `${CLAUDE_SESSION_ID}.md`. Stesso formato, ma frontmatter `status: ready` (non `draft`) e `agent: <id agente>`; per un teammate da fermare (chiusura, spegnimento, stop chiesto) aggiungi `mode: pausa`: la mod lo valida, lo archivia e ferma il teammate senza rilanciarlo.
+- **File**: quello della nota, con il percorso assoluto nel repo principale (`<radice>/.claude/handoff/pending/<sessione>--<id agente>.md`, `<radice>` come al passo 3, anche se il tuo cwd è un worktree), non `${CLAUDE_SESSION_ID}.md`. Stesso formato, ma frontmatter `status: ready` (non `draft`) e `agent: <id agente>`; per un teammate da fermare (chiusura, spegnimento, stop chiesto) aggiungi `mode: pausa`: la mod lo valida, lo archivia e ferma il teammate senza rilanciarlo.
 - **Commit**: prima di scrivere l'handoff committa i file che hai modificato tu, per nome (`git add <file>…`; mai `git add -A` né `git add .`; mai i file di `.claude/handoff/`), con un messaggio che dica il punto raggiunto. Se non puoi (test rossi, file in comune con altri, permesso negato, niente repo git), elenca nell'handoff, in «Modifiche», alla riga «Non committato», i file non committati e il motivo.
 - **Teammate**: non lanciare il validatore e non segnare `validated`. Scrivi il file, chiudi il turno con la sola riga `HANDOFF <percorso>: la mod valida e rilancia questo teammate, non riprendere da solo`: la mod lo valida, ferma il teammate e lo rilancia con lo stesso nome, tipo e modello (non l'effort), dandogli l'handoff come prompt.
 - **Subagent**: la mod non lo valida. Controlla il file da solo sui punti del validatore e rispondi con una sola riga: `HANDOFF <percorso>: rilancia un subagent <tipo> con prompt «Riprendi dall'handoff <percorso>»`. Chi ti ha lanciato rilancia.
+- **Prima della riga finale** `test -s <percorso>`: se fallisce, riscrivi il file e non annunciarlo.
 - Se il compito si chiude in pochi passi, finiscilo e rispondi come al solito. Niente `/clear` dentro un agente.
