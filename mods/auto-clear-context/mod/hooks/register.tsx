@@ -454,10 +454,14 @@ const archiveResumed = async ($: EngineInterface, prompt: string) => {
   const found = resumedHandoff(prompt)
   if (found === undefined) return
   const { root } = await paths($)
-  const handoff =
+  let handoff =
     found.absolute !== undefined
       ? await readHandoff($, found.absolute)
       : ((await readHandoff($, `${root}/${found.path}`)) ?? (await readOutside($, found.path, (await findAgent($, found.agentId))?.cwd)))
+  // Il percorso assoluto nel principale che non c'è: il file può essere nel worktree o nel cwd dell'agente.
+  if (handoff === undefined && found.absolute?.startsWith(`${root}/`) === true) {
+    handoff = await readOutside($, found.absolute.slice(root.length + 1), (await findAgent($, found.agentId))?.cwd)
+  }
   if (handoff === undefined) return
   const resumed = { ...handoff, text: setFront(handoff.text, { status: 'resumed' }) }
   const archived = await archiveCopy($, resumed)
@@ -947,10 +951,13 @@ const warnHandoff = async ($: EngineInterface, owner: string, why: string) => {
   leadNotes.push(`${text.replace('auto-clear-context: ', `auto-clear-context: l'agente ${info?.description ?? owner} (${owner}) aveva una nota di handoff; `)} Se serve, diglielo tu.`)
 }
 
-// Una nota di zona partita verso `owner`: si attende il suo file.
+// Una nota di zona partita verso `owner`: si attende il suo file. Una nota nuova per lo stesso file conserva
+// skill e timer già scaduto: si azzerano solo l'avviso e il timer.
 const expectHandoff = ($: EngineInterface, owner: string, path: string) => {
+  const old = handoffWaits.get(owner)
+  const kept = old?.path === path ? { isDue: old.isDue, isSkillRun: old.isSkillRun } : { isDue: false, isSkillRun: false }
   forgetWait(owner)
-  const wait: HandoffWait = { path, isWarned: false, isDue: false, isSkillRun: false }
+  const wait: HandoffWait = { path, isWarned: false, ...kept }
   handoffWaits.set(owner, wait)
   if (handoffWaitMs <= 0) return
   wait.timer = $.clock.after(handoffWaitMs, () => {
@@ -969,12 +976,12 @@ const checkHandoffAtEnd = async ($: EngineInterface, owner: string, answer: stri
   const wait = handoffWaits.get(owner)
   if (wait === undefined || wait.isWarned) return
   const isAnnounced = /\bHANDOFF\b/.test(answer) || wait.isSkillRun
-  if (isAnnounced || wait.isDue) {
-    await warnHandoff($, owner, 'fine turno')
+  // Un subagent che chiude il compito senza handoff ha finito: non si attende più il suo file, anche col timer scaduto.
+  if (!isAnnounced && owner !== 'main' && (await findAgent($, owner))?.teammateId === undefined) {
+    forgetWait(owner)
     return
   }
-  // Un subagent che chiude il compito senza handoff ha finito: non si attende più il suo file.
-  if (owner !== 'main' && (await findAgent($, owner))?.teammateId === undefined) forgetWait(owner)
+  if (isAnnounced || wait.isDue) await warnHandoff($, owner, 'fine turno')
 }
 
 // Le note durante il turno, dopo il risultato di un tool: a un agente la sua zona e la
@@ -1728,7 +1735,9 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (result.deny !== undefined || next.origin.plugin !== 'engine') return result
     const call = e as { command?: unknown; run_in_background?: unknown; skill?: unknown }
-    if (e.tool === 'Skill' && typeof call.skill === 'string' && call.skill.includes('handoff')) {
+    // La skill handoff si segna dopo le note: una nota nuova nello stesso tool.call non la perde.
+    const markSkill = () => {
+      if (e.tool !== 'Skill' || typeof call.skill !== 'string' || !call.skill.includes('handoff')) return
       const wait = handoffWaits.get(e.agentId ?? 'main')
       if (wait !== undefined) wait.isSkillRun = true
     }
@@ -1736,7 +1745,7 @@ export const register: Register = (on, options) => {
       backgroundCommands.set(e.agentId, call.command)
     }
     try {
-      const zoneNotes = await turnNotes($, e.agentId, configured, agentTokensLimits)
+      const zoneNotes = await turnNotes($, e.agentId, configured, agentTokensLimits).finally(markSkill)
       const notes = [...(e.agentId === undefined ? leadNotes.splice(0) : []), ...zoneNotes]
       return notes.length === 0 ? result : { ...result, context: [...(result.context ?? []), ...notes] }
     } catch (error) {

@@ -308,3 +308,37 @@ test('ripresa da percorso relativo con il file solo nel worktree: segnato resume
   await settled()
   expect(state.files.get(`${WT_PENDING}/s1--a7.md`)).toContain('status: resumed')
 })
+
+test('ripresa da percorso assoluto nel principale con il file solo nel worktree: segnato resumed', async ($, on) => {
+  const state = world(on)
+  state.files.set(`${WT_PENDING}/s1--a7.md`, READY_A7)
+  await $.tool.call(resume(`${PENDING}/s1--a7.md`))
+  await settled()
+  expect(state.files.get(`${WT_PENDING}/s1--a7.md`)).toContain('status: resumed')
+})
+
+const skill = () => ({ tool: 'Skill', skill: 'auto-clear-context:handoff' }) as never
+
+test('skill handoff e nota dura nello stesso tool.call: a fine turno senza file, avviso', async ($, on) => {
+  const state = world(on)
+  await mainNote($, state)
+  await state.clock.advance(31_000)
+  state.percent = 65
+  const [hard] = (await $.tool.call(skill())).context ?? []
+  expect(hard).toContain(`${PENDING}/s1.md`)
+  await $.turn.complete(mainDone('ok'))
+  await settled()
+  const [warning] = (await $.tool.call(bash())).context ?? []
+  expect(warning).toContain("il file non c'è")
+})
+
+test('subagent col timer scaduto nel turno che chiude senza HANDOFF: nessun avviso', async ($, on) => {
+  const state = world(on, subagent())
+  await agentNote($, state)
+  await state.clock.advance(181_000)
+  await settled()
+  await $.turn.complete(agentDone('a1', 'fatto, ecco il report'))
+  await settled()
+  expect((await $.tool.call(bash())).context ?? []).toEqual([])
+  expect(state.logs.some(line => line.includes('handoff atteso'))).toBe(false)
+})
