@@ -872,9 +872,92 @@ const agentZoneContext = async ($: EngineInterface, agentId: string, configured:
   if (!(await markSignaled($, `agent:${agentId}`, zone))) return undefined
   const path = agentPaths.get(agentId) ?? `${(await paths($)).root}/${agentHandoffPath(await $.session.id(), agentId)}`
   agentPaths.set(agentId, path)
+  expectHandoff($, agentId, path)
   const model = await agentModel($, agentId)
   log($, `agente ${short(agentId)} a ~${formatK(tokens)} token (${ZONE_NAMES[zone]}): nota di handoff${model === '' ? ', senza modello (skill o validatore illeggibili)' : ''}`)
   return agentZoneNote(kindOf(info), zone, tokens, limits, path, info.type, model)
+}
+
+// Attese di handoff: dopo una nota di zona, per chi l'ha ricevuta ('main' o l'id dell'agente), il file atteso.
+// A fine turno con HANDOFF (o dopo la skill handoff) e allo scadere di handoffWaitSeconds, se il file manca o è
+// vuoto, un avviso: una volta per nota. `isDue`: il timer è scaduto mentre il destinatario era in un turno.
+type HandoffWait = { path: string; isWarned: boolean; isDue: boolean; isSkillRun: boolean; timer?: Timer }
+const handoffWaits = new Map<string, HandoffWait>()
+let handoffWaitMs = 180_000
+
+// Lo stato del file atteso: 'ok' se c'è e non è vuoto (anche fuori dal principale, dove la mod lo recupera).
+const handoffState = async ($: EngineInterface, path: string, agentCwd?: string): Promise<'ok' | 'missing' | 'empty'> => {
+  const text = await orElse($.fs.read(path), undefined)
+  if (typeof text === 'string' && text.trim() !== '') return 'ok'
+  const { root } = await paths($)
+  if (path.startsWith(`${root}/`)) {
+    const relative = path.slice(root.length + 1)
+    for (const dir of await outsideRoots($, agentCwd)) {
+      const outside = await orElse($.fs.read(`${dir}/${relative}`), undefined)
+      if (typeof outside === 'string' && outside.trim() !== '') return 'ok'
+    }
+  }
+  return typeof text === 'string' ? 'empty' : 'missing'
+}
+
+const forgetWait = (owner: string) => {
+  handoffWaits.get(owner)?.timer?.cancel()
+  handoffWaits.delete(owner)
+}
+
+const isOwnerBusy = (owner: string) => (owner === 'main' ? isMainBusy : !endedAgents.has(owner))
+
+const warnHandoff = async ($: EngineInterface, owner: string, why: string) => {
+  const wait = handoffWaits.get(owner)
+  if (wait === undefined || wait.isWarned) return
+  const info = owner === 'main' ? undefined : await findAgent($, owner)
+  const state = await handoffState($, wait.path, info?.cwd)
+  if (state === 'ok') {
+    forgetWait(owner)
+    return
+  }
+  wait.isWarned = true
+  wait.timer?.cancel()
+  wait.timer = undefined
+  const what = state === 'missing' ? "il file non c'è" : 'è vuoto'
+  const text = `auto-clear-context: handoff atteso in ${wait.path}, ma ${what}. Scrivilo lì (percorso assoluto nel repo principale) e verificalo con \`test -s ${wait.path}\` prima della riga finale.`
+  log($, `handoff atteso${owner === 'main' ? '' : ` dall'agente ${short(owner)}`} (${why}): ${wait.path}, ${what}`)
+  if (owner === 'main') {
+    leadNotes.push(text)
+    return
+  }
+  if (info !== undefined && kindOf(info) === 'teammate') {
+    const sent = await $.session.send({ to: { agentId: owner }, text }).then(
+      outcome => (outcome as { isDelivered?: boolean } | undefined)?.isDelivered !== false,
+      () => false,
+    )
+    if (sent) return
+  }
+  leadNotes.push(`${text.replace('auto-clear-context: ', `auto-clear-context: l'agente ${info?.description ?? owner} (${owner}) aveva una nota di handoff; `)} Se serve, diglielo tu.`)
+}
+
+// Una nota di zona partita verso `owner`: si attende il suo file.
+const expectHandoff = ($: EngineInterface, owner: string, path: string) => {
+  forgetWait(owner)
+  const wait: HandoffWait = { path, isWarned: false, isDue: false, isSkillRun: false }
+  handoffWaits.set(owner, wait)
+  if (handoffWaitMs <= 0) return
+  wait.timer = $.clock.after(handoffWaitMs, () => {
+    wait.timer = undefined
+    if (handoffWaits.get(owner) !== wait) return
+    if (isOwnerBusy(owner)) {
+      wait.isDue = true
+      return
+    }
+    warnHandoff($, owner, 'attesa scaduta').catch((error: unknown) => log($, `handoff atteso non controllato: ${errorText(error)}`))
+  })
+}
+
+// Fine turno di `owner`: avviso se ha annunciato l'handoff (o usato la skill) o se il timer è scaduto nel turno.
+const checkHandoffAtEnd = async ($: EngineInterface, owner: string, answer: string) => {
+  const wait = handoffWaits.get(owner)
+  if (wait === undefined || wait.isWarned) return
+  if (/\bHANDOFF\b/.test(answer) || wait.isSkillRun || wait.isDue) await warnHandoff($, owner, 'fine turno')
 }
 
 // Le note durante il turno, dopo il risultato di un tool: a un agente la sua zona e la
@@ -903,6 +986,7 @@ const turnNotes = async (
   if (!(await markSignaled($, session, zone))) return []
   if (pendingNote?.session === session && pendingNote.zone <= zone) pendingNote = undefined
   log($, `contesto al ${percent}% (${ZONE_NAMES[zone]}) durante il turno: segnalato a Claude`)
+  expectHandoff($, 'main', `${(await paths($)).root}/${handoffPath(session)}`)
   return [await buildNote($, zone, percent, limits, session)]
 }
 
@@ -942,6 +1026,7 @@ const forgetAgent = (agentId: string) => {
   doneRounds.delete(agentId)
   checking.delete(agentId)
   agentPaths.delete(agentId)
+  forgetWait(agentId)
 }
 
 // Rilancio del teammate con l'handoff validato: TaskStop, poi $.agent.spawn con l'input originale dell'Agent
@@ -1394,6 +1479,8 @@ export const register: Register = (on, options) => {
   agentsEnabled = options.agents !== false
   agentStaleMinutes = Math.min(Number(options.agentStaleMinutes ?? 30), MAX_STALE_MINUTES)
   const stopMinutes = Number(options.deliveredStopMinutes ?? 5)
+  const waitSeconds = Number(options.handoffWaitSeconds ?? 180)
+  handoffWaitMs = Number.isFinite(waitSeconds) ? Math.max(waitSeconds, 0) * 1000 : 180_000
   deliveredStopMinutes = Number.isFinite(stopMinutes) ? Math.min(Math.max(stopMinutes, 0), MAX_STALE_MINUTES) : 5
   const tokenOption = (value: unknown, fallback: number) => {
     const n = Number(value ?? fallback)
@@ -1486,6 +1573,7 @@ export const register: Register = (on, options) => {
       if (note.session === session && (await markSignaled($, session, note.zone))) {
         log($, `${ZONE_NAMES[note.zone]} segnalata a Claude insieme al prompt`)
         context.push(note.text)
+        expectHandoff($, 'main', `${(await paths($)).root}/${handoffPath(session)}`)
       }
     }
     return context.length === (e.context?.length ?? 0) ? next(e) : next({ ...e, context })
@@ -1514,7 +1602,10 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId !== undefined) {
       const agentId = e.agentId
-      if (!e.isAborted) endedAgents.add(agentId)
+      if (!e.isAborted) {
+        endedAgents.add(agentId)
+        await checkHandoffAtEnd($, agentId, e.answer).catch((error: unknown) => log($, `handoff atteso non controllato: ${errorText(error)}`))
+      }
       if (e.isAborted) {
         // Validatore annullato: si libera il teammate, il suo prossimo turno rilancia lo stesso giro.
         const job = validating.get(agentId)
@@ -1535,6 +1626,7 @@ export const register: Register = (on, options) => {
       return result
     }
     await watchDelivered($).catch((error: unknown) => log($, `agenti consegnati non controllati: ${errorText(error)}`))
+    if (!e.isAborted) await checkHandoffAtEnd($, 'main', e.answer).catch((error: unknown) => log($, `handoff atteso non controllato: ${errorText(error)}`))
     if (e.isAborted || isClearRequested) return result
     await tryClear($, 'fine turno della principale')
     return result
@@ -1543,6 +1635,7 @@ export const register: Register = (on, options) => {
   on('session.end', ($, e, next) => {
     // Un handoff di pausa archiviato e non ancora allegato passa anche a un altro /clear prima del primo prompt.
     const carried = e.reason === 'clear' ? attachFor?.ready : undefined
+    if (e.reason === 'clear') forgetWait('main')
     attachFor = e.reason === 'clear' ? { owner: e.sessionId, source: 'clear', ...(carried === undefined ? {} : { ready: carried }) } : undefined
     if (e.reason === 'clear' && isClearRequested && isPauseClear) {
       // Pausa: archivio subito (resta anche se il PC si spegne), nessuna ripresa; il primo prompt scritto lo allega.
@@ -1617,7 +1710,11 @@ export const register: Register = (on, options) => {
     await orElse(markSeen($, e.agentId), undefined)
     const result = await next(e)
     if (result.deny !== undefined || next.origin.plugin !== 'engine') return result
-    const call = e as { command?: unknown; run_in_background?: unknown }
+    const call = e as { command?: unknown; run_in_background?: unknown; skill?: unknown }
+    if (e.tool === 'Skill' && typeof call.skill === 'string' && call.skill.includes('handoff')) {
+      const wait = handoffWaits.get(e.agentId ?? 'main')
+      if (wait !== undefined) wait.isSkillRun = true
+    }
     if (e.agentId !== undefined && typeof call.command === 'string' && (call.run_in_background === true || e.tool === 'Monitor')) {
       backgroundCommands.set(e.agentId, call.command)
     }
