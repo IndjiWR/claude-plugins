@@ -66,6 +66,7 @@ const RESTARTS_KEPT = 20
 const EVENTS_KEPT = 300
 const BUSY = ['pending', 'running', 'waiting']
 const DEFER_WARN_MS = 20 * 60_000
+const DEFER_DENY = 'clear in attesa: non lanciare agenti nuovi; chiudi quelli che hanno consegnato e chiudi il turno.'
 // Soglie in token della principale (userConfig mainSoftTokens/mainHardTokens); 0 = solo percentuali.
 let mainTokens = { soft: 0, hard: 0 }
 
@@ -197,6 +198,11 @@ const lastSeen = new Map<string, number>()
 const staleLogged = new Set<string>()
 const MAX_STALE_MINUTES = 1440
 let agentStaleMinutes = 30
+// Un teammate in un pannello separato non manda eventi qui: la sua attività si legge dall'elenco
+// (stato, label, token). Per agente, l'ultima firma vista; un cambio vale come un evento.
+const panelSigns = new Map<string, string>()
+// Col clear rimandato la principale non lancia agenti nuovi (userConfig blockAgentsWhileDeferred).
+let blockAgentsWhileDeferred = true
 let staleTimer: Timer | undefined
 // Subagent che hanno già consegnato (taskStatus completed o fine turno vista senza un nuovo inizio) ma restano
 // attivi, per esempio per un loro processo in background: avvisati subito, fermati con TaskStop dopo DELIVERED_GRACE_MS.
@@ -1270,8 +1276,18 @@ const activeAgents = async ($: EngineInterface, ending?: string) => {
   )
   const now = await $.clock.now()
   return busy.filter(agent => {
-    // Teammate in un pannello separato: il suo ciclo non gira qui, nessun evento; conta solo l'elenco.
-    if (isPanelTeammate(agent)) return true
+    // Teammate in un pannello separato: il suo ciclo non gira qui, nessun evento; una riga dell'elenco rimasta
+    // running anche se il pannello è morto o fermo non deve trattenere il clear per sempre: stessa scadenza degli altri,
+    // contata dall'ultima variazione di stato, label o token.
+    if (isPanelTeammate(agent)) {
+      const sign = `${agent.status}|${agent.label}|${agent.tokenCount}`
+      if (panelSigns.get(agent.id) !== sign) {
+        panelSigns.set(agent.id, sign)
+        lastSeen.set(agent.id, now)
+        staleLogged.delete(agent.id)
+        return true
+      }
+    }
     const seen = lastSeen.get(agent.id)
     if (seen === undefined) {
       lastSeen.set(agent.id, now)
@@ -1307,7 +1323,7 @@ const scheduleStaleCheck = ($: EngineInterface, busy: readonly AgentInfo[], now:
     // Un consegnato già passato alla principale (TaskStop rifiutato) torna alla sola scadenza; con la principale
     // in un turno il TaskStop aspetta la sua fine turno, che ricontrolla da sola.
     if (since !== undefined && isDelivered(agent) && !leadAsked.has(agent.id) && !isMainBusy) dues.push(since + DELIVERED_GRACE_MS)
-    else if (agentStaleMinutes > 0 && !isPanelTeammate(agent)) dues.push((lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000)
+    else if (agentStaleMinutes > 0) dues.push((lastSeen.get(agent.id) ?? now) + agentStaleMinutes * 60_000)
   }
   if (dues.length === 0) return
   staleTimer = $.clock.after(Math.max(1, Math.min(...dues) - now), () => {
@@ -1472,10 +1488,18 @@ const tryClear = async ($: EngineInterface, reason: string, ending?: string) => 
     }
     const listed = await activeAgents($, ending)
     if (listed.length > 0 && deferredId !== handoff.id) {
+      // Handoff riscritto ma ancora validato con un rinvio in corso: il rinvio è lo stesso, da quando è cominciato.
+      const since = deferredSince
+      const warned = isDeferWarned
       resetDeferral()
       deferredId = handoff.id
-      deferredSince = now
-      log($, `handoff ${handoff.id} validato, ma ${listed.length} agenti ancora attivi: clear rimandato a quando si fermano (${reason})`)
+      if (since === undefined) {
+        deferredSince = now
+        log($, `handoff ${handoff.id} validato, ma ${listed.length} agenti ancora attivi: clear rimandato a quando si fermano (${reason})`)
+      } else {
+        deferredSince = since
+        isDeferWarned = warned
+      }
     }
     const stopped = await stopDelivered($, listed, now)
     const busy = listed.filter(agent => !stopped.has(agent.id))
@@ -1513,6 +1537,7 @@ export const register: Register = (on, options) => {
   maxClearsPerHour = Number(options.maxClearsPerHour ?? 3)
   maxRestartsPerHour = maxClearsPerHour
   agentsEnabled = options.agents !== false
+  blockAgentsWhileDeferred = options.blockAgentsWhileDeferred !== false
   agentStaleMinutes = Math.min(Number(options.agentStaleMinutes ?? 30), MAX_STALE_MINUTES)
   const stopMinutes = Number(options.deliveredStopMinutes ?? 5)
   const waitSeconds = Number(options.handoffWaitSeconds ?? 180)
@@ -1568,6 +1593,13 @@ export const register: Register = (on, options) => {
 
   // Un teammate avviato dal tool Agent: se ne tiene l'input, per rilanciarlo uguale. Solo osservazione.
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    // Handoff validato in attesa del clear: ogni agente nuovo della principale (fork compresi) trattiene il clear
+    // di nuovo. Gli spawn della mod (validatore, rilanci) passano da $.agent.spawn, non da qui; quelli di altri
+    // plugin e degli agenti non si toccano.
+    if (blockAgentsWhileDeferred && agentsEnabled && deferredId !== undefined && e.agentId === undefined && next.origin.plugin === 'engine') {
+      log($, `Agent «${e.description}» negato: clear in attesa del handoff ${deferredId}`)
+      return { deny: DEFER_DENY }
+    }
     const result = await next(e)
     // Lo spawn è già avvenuto: gli errori dell'archiviazione restano nel log (mai un secondo next).
     if (result.deny === undefined && result.isError !== true) {

@@ -1,6 +1,6 @@
 {
   "name": "auto-clear-context",
-  "version": "0.15.1",
+  "version": "0.16.0",
   "description": "Vicino alle soglie di contesto (morbida, dura, margine di sicurezza) Claude salva lo stato in un handoff validato; la mod esegue /clear e fa ripartire il lavoro nella sessione pulita.",
   "author": { "name": "Indji" },
   "types": "./types/index.d.ts",
@@ -58,6 +58,12 @@
       "title": "Scadenza degli agenti (minuti)",
       "description": "Minuti senza attività dopo cui un agente dato ancora attivo non trattiene più il clear della principale. 0 la spegne.",
       "default": 30
+    },
+    "blockAgentsWhileDeferred": {
+      "type": "boolean",
+      "title": "Niente agenti nuovi col clear in attesa",
+      "description": "Se attivo, mentre l'handoff della principale è validato e il clear è rimandato per agenti ancora attivi, un nuovo Agent della principale è negato: gli agenti attivi possono scendere a zero e il clear partire.",
+      "default": true
     },
     "deliveredStopMinutes": {
       "type": "number",

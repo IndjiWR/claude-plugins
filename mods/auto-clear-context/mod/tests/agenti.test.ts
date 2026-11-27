@@ -1134,8 +1134,39 @@ test("handoff che ha già avuto il suo clear durante il rinvio: il timer della s
   expect(mainReads(state)).toBe(before)
 })
 
-test('teammate in pannello separato (id === teammateId), running senza eventi per 60 minuti: nessun clear', async ($, on) => {
-  const state = world(on, [{ id: 'w@t', teammateId: 'w@t', type: 'teammate', description: 'x', status: 'running' }, validator('v1')])
+const panelMate = () => ({ id: 'w@t', teammateId: 'w@t', type: 'teammate', description: 'x', status: 'running', label: 'lavora', tokenCount: 10 })
+
+test('teammate in pannello separato (id === teammateId) running e immobile per 30 minuti: scade e il clear parte', async ($, on) => {
+  const state = world(on, [panelMate(), validator('v1')])
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect(state.commands).toEqual([])
+  await state.clock.advance(30 * 60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  expect(staleLogs(state).length).toBe(1)
+})
+
+test('teammate in pannello separato che cambia label o token: non scade finché si muove', async ($, on) => {
+  const mate = panelMate()
+  const state = world(on, [mate, validator('v1')])
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(25 * 60_000)
+  mate.tokenCount = 500
+  await state.clock.advance(6 * 60_000)
+  await settled()
+  expect(state.commands).toEqual([])
+  expect(staleLogs(state)).toEqual([])
+  await state.clock.advance(30 * 60_000)
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+})
+
+test('teammate in pannello separato con agentStaleMinutes 0: nessuna scadenza', { options: { agentStaleMinutes: 0 } }, async ($, on) => {
+  const state = world(on, [panelMate(), validator('v1')])
   state.files.set(MAIN_FILE, MAIN_VALIDATED)
   await $.turn.complete(mainDone())
   await settled()
@@ -1462,4 +1493,88 @@ test('teammate con una shell lanciata in un turno precedente, waiting dopo un tu
   await state.clock.advance(60 * 60_000)
   await settled()
   expect(taskStops(state)).toEqual([])
+})
+
+// Con l'handoff validato in attesa del clear la principale non lancia agenti nuovi.
+const spawnCall = (extra: object = {}) =>
+  ({ tool: 'Agent', subagent_type: 'general-purpose', description: 'nuovo', prompt: 'fai', ...extra }) as never
+
+test('clear rimandato: un Agent della principale è negato col motivo, senza arrivare al motore', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  const calls = state.toolCalls.length
+  const result = await $.tool.call(spawnCall())
+  expect(result.deny).toContain('clear in attesa: non lanciare agenti nuovi')
+  expect(state.toolCalls.length).toBe(calls)
+})
+
+test('clear rimandato: vale anche per i fork', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  const result = await $.tool.call(spawnCall({ subagent_type: 'fork' }))
+  expect(result.deny).toContain('clear in attesa')
+})
+
+test('senza clear rimandato l Agent della principale passa', async ($, on) => {
+  const state = world(on, running())
+  const result = await $.tool.call(spawnCall())
+  expect(result.deny).toBeUndefined()
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await $.turn.complete(done('a1'))
+  await settled()
+})
+
+test('clear rimandato: l Agent di un altro agente non è negato', async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  const result = await $.tool.call(spawnCall({ agentId: 'a1' }))
+  expect(result.deny).toBeUndefined()
+})
+
+test('blockAgentsWhileDeferred false: l Agent della principale passa anche col clear rimandato', { options: { blockAgentsWhileDeferred: false } }, async ($, on) => {
+  const state = world(on, running())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  const result = await $.tool.call(spawnCall())
+  expect(result.deny).toBeUndefined()
+})
+
+test('rinvio finito (clear eseguito): l Agent della principale passa di nuovo', async ($, on) => {
+  const list = running()
+  const state = world(on, list)
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  expect((await $.tool.call(spawnCall())).deny).toContain('clear in attesa')
+  Object.assign(list[0] ?? {}, { status: 'idle' })
+  await $.turn.complete(done('a1'))
+  await settled()
+  expect(state.commands).toEqual(['clear'])
+  expect((await $.tool.call(spawnCall())).deny).toBeUndefined()
+})
+
+test('handoff riscritto ma ancora validato: il rinvio non riparte e l avviso dei 20 minuti resta coerente', { options: { deliveredStopMinutes: 0 } }, async ($, on) => {
+  const state = world(on, twoRunning())
+  state.files.set(MAIN_FILE, MAIN_VALIDATED)
+  await $.turn.complete(mainDone())
+  await settled()
+  await state.clock.advance(15 * 60_000)
+  state.files.set(MAIN_FILE, MAIN_VALIDATED.replace('Fare y.', 'Fare z.'))
+  await $.turn.complete(mainDone('m2'))
+  await settled()
+  expect(state.logs.filter(line => line.includes('validato, ma')).length).toBe(1)
+  await state.clock.advance(6 * 60_000)
+  await $.tool.call(bash('a1'))
+  await settled()
+  expect(state.toasts.length).toBe(1)
+  expect(state.toasts[0]).toContain('clear rimandato da 21 minuti')
 })
