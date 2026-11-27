@@ -464,6 +464,32 @@ const launched = async ($: Engine, state: ReturnType<typeof world>) => {
   state.toolCalls.length = 0
 }
 // Un handoff pronto e il verdetto "completo" del validatore.
+test('handoff validato e invariato rimesso ready: niente nuovo validatore', async ($, on) => {
+  const state = world(on, teammate)
+  state.files.set(FILE, ready())
+  await turnEnd($, 'a1')
+  await turnEnd($, 'v1', 'LACUNE: nessuna\nVERDETTO: completo')
+  const hash = /validated_hash: (fnv:\S+)/.exec(state.files.get(FILE) ?? '')?.[1]
+  expect(hash).toBeDefined()
+  expect(state.spawns.length).toBe(1)
+  // il teammate rimette ready senza toccare il corpo: la mod non rilancia il validatore
+  state.files.set(FILE, ready(`validated_hash: ${hash}\n`))
+  await turnEnd($, 'a1')
+  expect(state.spawns.length).toBe(1)
+  expect(state.files.get(FILE)).not.toContain('status: ready')
+})
+
+test('handoff rimesso ready con corpo cambiato: rivalida come prima', async ($, on) => {
+  const state = world(on, teammate)
+  state.files.set(FILE, ready())
+  await turnEnd($, 'a1')
+  await turnEnd($, 'v1', 'LACUNE: nessuna\nVERDETTO: completo')
+  const hash = /validated_hash: (fnv:\S+)/.exec(state.files.get(FILE) ?? '')?.[1]
+  state.files.set(FILE, ready(`validated_hash: ${hash}\n`).replace('Fare x.', 'Fare y.'))
+  await turnEnd($, 'a1')
+  expect(state.spawns.length).toBe(2)
+})
+
 const validate = async ($: Engine, state: ReturnType<typeof world>, text = ready(), validatorId = 'v1') => {
   state.files.set(FILE, text)
   await turnEnd($, 'a1')
