@@ -19,8 +19,9 @@ description: Salva lo stato del lavoro in .claude/handoff/pending/<id della sess
    - Non scrivere in `.claude/handoff/pending.md` (il file condiviso delle versioni precedenti) né nel file di un'altra sessione.
    - Solo se il percorso qui sopra non contiene un id di sessione, usa quello dell'ultima nota di zona della mod e metti in `session` l'id che compare nel nome di quel file.
    - Se il progetto è un repo git, `.claude/handoff/` deve stare in `.git/info/exclude`; aggiungilo se manca. Niente commit né push di questi file.
-4. **Fallo validare** dall'agent `auto-clear-context:handoff-validator`, in foreground, con `model: sonnet` (l'effort low è nella sua definizione), passandogli **solo** il percorso assoluto del file. Confronta la sua ricostruzione con lo stato reale, correggi le lacune e rilancia. Al massimo 2 giri.
-5. **Segna l'handoff come validato** nel frontmatter: `status: validated`, `validated_at` (ISO 8601) e `rounds`; `session` resta com'è. Se è un handoff di **pausa** (spegnimento del PC, chiusura notturna, stop chiesto dall'utente) aggiungi `mode: pausa`: la mod esegue /clear e archivia l'handoff, ma non fa ripartire il lavoro.
+4. **Salta la validazione se è già valida**: se prima di riscrivere il file esisteva con `status: validated` e `validated_hash: sha256:<hash>`, e il corpo (tutto dopo il secondo `---`) ha lo stesso hash (`awk 'c>=2{print} /^---$/{c++}' <file> | shasum -a 256`), non lanciare il validatore: tieni `validated_hash` e `rounds` e vai al passo 5. Se il corpo è cambiato, valida come sotto.
+   **Fallo validare** dall'agent `auto-clear-context:handoff-validator`, in foreground, con `model: sonnet` (l'effort low è nella sua definizione), passandogli **solo** il percorso assoluto del file. Confronta la sua ricostruzione con lo stato reale, correggi le lacune e rilancia. Al massimo 2 giri.
+5. **Segna l'handoff come validato** nel frontmatter: `status: validated`, `validated_at` (ISO 8601), `rounds` e `validated_hash: sha256:<hash del corpo, calcolato come al passo 4>`; `session` resta com'è. Se è un handoff di **pausa** (spegnimento del PC, chiusura notturna, stop chiesto dall'utente) aggiungi `mode: pausa`: la mod esegue /clear e archivia l'handoff, ma non fa ripartire il lavoro.
 6. **Verifica il file con `test -s <percorso assoluto>`**: se fallisce (manca o è vuoto), riscrivilo e non annunciarlo. Poi **chiudi il turno con una sola riga** che nomina il file dell'handoff con il percorso assoluto, senza altre azioni. A fine turno la mod esegue /clear, allega l'handoff alla sessione pulita e fa ripartire il lavoro (con `mode: pausa` resta fermo: l'handoff va in `.claude/handoff/archive/` e si allega al primo prompt dell'utente); se il /clear non arriva, la riga dice da quale file riprendere a mano.
 
 ## Formato
@@ -34,6 +35,7 @@ session: ${CLAUDE_SESSION_ID}
 created_at: <ISO 8601>
 validated_at:
 rounds: 0
+validated_hash:
 branch: <branch git, o "nessun repo">
 head: <sha corto di HEAD>
 mode: <solo per una pausa: "pausa"; altrimenti togli la riga>

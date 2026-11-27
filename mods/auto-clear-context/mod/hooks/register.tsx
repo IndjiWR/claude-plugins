@@ -362,6 +362,9 @@ const reportOnce = ($: EngineInterface, handoff: Handoff, text: string) => {
   log($, text)
 }
 
+// Impronta del corpo dell'handoff (senza frontmatter): non cambia se cambiano solo status, rounds, validated_at.
+const bodyHash = (text: string) => `fnv:${fingerprint(text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, ''))}`
+
 const readHandoff = async ($: EngineInterface, path: string): Promise<Handoff | undefined> => {
   const text = await readText($, path)
   if (text.trim() === '') return undefined
@@ -1177,6 +1180,15 @@ const checkTeammate = async ($: EngineInterface, agentId: string) => {
     if (handoff?.status === 'validated') return await restartAgent($, agentId, handoff, true)
     if (handoff?.status !== 'ready') return
     const path = handoff.path
+    // Già validato e corpo invariato: non si rilancia il validatore.
+    const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(handoff.text)?.[1] ?? ''
+    if (frontField(front, 'validated_hash') === bodyHash(handoff.text)) {
+      await $.fs.write(path, setFront(handoff.text, { status: 'validated' }))
+      log($, `handoff del teammate ${short(agentId)} già validato e invariato: nessuna nuova validazione`)
+      const again = await readHandoff($, path)
+      if (again !== undefined) await restartAgent($, agentId, again)
+      return
+    }
     const round = Math.max(roundsOf(handoff.text), doneRounds.get(agentId) ?? 0) + 1
     const spawned = await $.agent.spawn({
       subagentType: VALIDATOR,
@@ -1227,7 +1239,7 @@ const concludeValidation = async ($: EngineInterface, validatorId: string, answe
     doneRounds.set(job.agentId, Number(rounds))
     if (verdict.isComplete || job.round >= 2) {
       doneRounds.delete(job.agentId)
-      const base = setFront(handoff.text, { status: 'validated', rounds })
+      const base = setFront(handoff.text, { status: 'validated', rounds, validated_hash: bodyHash(handoff.text) })
       await $.fs.write(job.path, verdict.isComplete || verdict.gaps === '' ? base : appendGaps(base, verdict.gaps))
       log($, `handoff del teammate ${short(job.agentId)} validato (giro ${job.round}${verdict.isComplete ? '' : ', con lacune annotate'})`)
       const validated = await readHandoff($, job.path)
